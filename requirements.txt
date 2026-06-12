@@ -10,4 +10,7 @@ pdfplumber>=0.9.0
 # Excel 读写
 openpyxl>=3.1.0
 
+# 旧版 Excel 读取 (.xls)
+xlrd>=2.0.0
+
 # 数据库：SQLite（Python 内置，无需额外安装）

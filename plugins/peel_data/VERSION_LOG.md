@@ -6,6 +6,44 @@
 
 ---
 
+## [1.5.0] - 2026-06-13
+
+### 新增功能
+- **试样名称智能提取**：新增按优先级链提取试样名称的逻辑——优先级 1: 从文件名提取（保留完整的正极/负极前缀和型号中的连字符）；优先级 2: 从已有 sample_name 中提取"正极"/"负极"前缀全量名称；优先级 3: 保留已提取的名称。通用文件名（test、data、temp 等）自动降级为使用文件内容中的名称
+- **锂电池材料关键词库**：`config.py` 新增 `lithium_battery_materials` 关键词库（50+ 条），覆盖导电液（导电液、单壁管导电液、CNT导电液）、导电剂（KS-6、SP-Li、SuperP、乙炔黑、VGCF）、石墨类（人造石墨、天然石墨、球形石墨、MCMB）、三元类（NCM、NCA、LFP、LCO）、粘结剂（PVDF、CMC、SBR）、高温胶/膨胀胶、硅基材料（硅碳、SiO、氧化亚硅）、隔膜/电解液、集流体等
+- **材料关键词辅助极性判定**：`config.determine_polarity_with_materials()` 先用正负极关键字判定，再用材料关键词辅助——含铝相关→正极，含铜相关→负极，石墨→负极，三元/NCM/NCA/LFP→正极，硅碳/SiO→负极
+- **工具函数集**：`config.py` 新增 4 个静态方法——`extract_sample_name_from_filename()`（从文件名提取试样名称）、`extract_sample_name_by_polarity_prefix()`（从极性前缀提取完整名称）、`match_material_keywords()`（匹配材料关键词）、`determine_polarity_with_materials()`（含材料辅助的极性判定）
+
+### 功能改进
+- ExcelParser 和 PDFParser 统一使用 `_upgrade_sample_name()` 方法升级试样名称，确保两个解析器的提取逻辑完全同步
+- ExcelParser 和 PDFParser 的 `_determine_polarity()` 统一调用 `config.determine_polarity_with_materials()`，极性判定结果包含材料关键词信息
+- 文件名提取时保留型号中的连字符（如 `INR21700-40PE` 不再被拆分为 `INR21700 40PE`）
+- 去重策略优化：移除跨批次数据库查询去重，仅保留单次提取的批次内去重（按 test_date+test_time+polarity），由数据库 UNIQUE 约束处理写入时去重
+- 数据预览表格改造：去掉 PreviewDialog 弹窗，数据直接填入主窗口表格；去重跳过的记录用暖黄底色 (#fff3cd) 显示，新增"状态"列区分"✓ 已保留"和"⚠ 去重跳过"
+
+---
+
+## [1.4.0] - 2026-06-12
+
+### 新增功能
+- 数据目录路径动态化：移除硬编码路径，首次使用时数据目录留空，用户通过"浏览"按钮自行选择后自动持久化到 `data/app_config.json`，后续启动自动回填上次目录
+- 历史记录操作时间：每次提取操作自动记录精确时间戳（格式 `yyyy-MM-dd HH:mm:ss`），在历史记录表格中独立展示，支持持久化存储和排序
+
+### 功能改进
+- 极性判定统一化：PDFParser 改用 `config.py` 中的 `positive_keywords` / `negative_keywords` 关键字列表判定极性（含试样名称+文件名双重匹配），与 ExcelParser 保持一致
+- 旧版 Python 2.x dict 键名修复：ExcelParser 日志摘要中 `S1`~`S4` 改为 `curve_1`~`curve_4`，与 `PeelDataRecord` dataclass 字段名对齐
+- 来源文件完整路径：`source_file` 字段从仅存文件名改为存储完整绝对路径，导出 Excel/CSV 时自动使用完整路径；数据预览表格"来源文件"列支持右键菜单「打开文件所在位置」，调用 Windows 资源管理器定位并高亮文件
+
+### 问题修复
+- **修复提取过程中程序闪退（严重）**：`WidgetLogHandler.emit()` 在 worker 线程直接操作 `QTextEdit.append()` 违反 Qt 线程安全规则，在 Windows 上导致 `0xC0000005` 访问冲突崩溃；改为 `Signal(str, str)` + `QueuedConnection` 跨线程安全传递日志
+- 修复 `.xls` 文件无法提取剥离强度数据：`_parse_xls_sheet()` 中 `pass` 占位符替换为完整实现，支持 Format A（横向 S 列）和 Format B（纵向曲线行）两种布局的 xlrd 适配版解析
+- 修复 `test_datetime` 属性对 `datetime.date` 对象调用 `.strip()` 导致 `AttributeError` 崩溃：增加 `isinstance` 类型检测，统一转为 `isoformat()` 字符串
+- 修复 `to_dict()` 透传 `datetime.date` / `datetime.time` 对象导致 SQLite `executemany` 绑定失败：在序列化阶段统一转换为 `isoformat()` 字符串
+- 修复 `insert_many_ignore` 和 `insert_ignore` 不处理 `datetime.time` 类型导致数据库写入失败：参数绑定前增加 `_adapt()` 防御层，自动转换 `datetime.date` / `datetime.time` → `isoformat()` 字符串
+- **修复时间精度不一致导致重复数据误判**：不同数据源的 `test_time` 格式不统一（`"14:30"` vs `"14:30:00"`），导致 `UNIQUE(test_date,test_time,sample_name)` 约束无法识别同一试验；新增 `_normalize_date()` / `_normalize_time()` 规范化函数，强制统一 `test_date` → `YYYY-MM-DD`、`test_time` → `HH:MM:SS` 格式
+- **修复同一测试从 PDF/Excel 提取时因 sample_name 不一致产生重复数据**：同一物理测试在不同文件格式中 `sample_name` 不同（PDF 简名 vs Excel 完整文件名），导致 UNIQUE 约束失效；新增 `_dedup_records()` 方法，在入库前按 `(test_date, test_time, polarity)` 批次内+跨批次去重，手动新增记录同样增加去重检查
+
+---
 ## [1.3.0] - 2026-06-12
 
 ### 新增功能

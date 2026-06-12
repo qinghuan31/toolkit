@@ -7,6 +7,7 @@
 
 import sqlite3
 import os
+import datetime as _dt
 from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
 from config import config
@@ -109,13 +110,19 @@ class DatabaseManager:
         """
         插入数据，遇到唯一约束冲突则跳过（INSERT OR IGNORE）
         返回 True 表示插入成功，False 表示跳过
+
+        自动将 datetime.date / datetime.time 转换为 isoformat 字符串。
         """
         if not self._db_available:
             return False
         columns = ", ".join(f'"{k}"' for k in data.keys())
         placeholders = ", ".join(["?"] * len(data))
         sql = f'INSERT OR IGNORE INTO "{table}" ({columns}) VALUES ({placeholders})'
-        affected = self.execute(sql, tuple(data.values()))
+        values = tuple(
+            v.isoformat() if isinstance(v, (_dt.date, _dt.time)) else v
+            for v in data.values()
+        )
+        affected = self.execute(sql, values)
         return affected > 0
 
     def insert_many_ignore(
@@ -124,6 +131,8 @@ class DatabaseManager:
         """
         批量插入，遇到唯一约束冲突跳过
         返回 (成功数, 跳过数)
+
+        自动将 datetime.date / datetime.time 转换为 isoformat 字符串。
         """
         if not data_list:
             return 0, 0
@@ -135,7 +144,13 @@ class DatabaseManager:
         placeholders = ", ".join(["?"] * len(columns))
         sql = f'INSERT OR IGNORE INTO "{table}" ({col_str}) VALUES ({placeholders})'
 
-        params_list = [tuple(d[c] for c in columns) for d in data_list]
+        def _adapt(val):
+            """将 datetime 类型转换为 SQLite 兼容的 isoformat 字符串"""
+            if isinstance(val, (_dt.date, _dt.time)):
+                return val.isoformat()
+            return val
+
+        params_list = [tuple(_adapt(d[c]) for c in columns) for d in data_list]
         with self.get_connection() as conn:
             cursor = conn.executemany(sql, params_list)
             conn.commit()

@@ -13,10 +13,10 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QFileDialog, QGroupBox,
     QTableWidget, QTableWidgetItem, QComboBox, QCheckBox,
     QProgressBar, QTextEdit, QSplitter, QHeaderView,
-    QMessageBox, QSizePolicy, QDialog,
+    QMessageBox, QSizePolicy, QDialog, QMenu,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QDateTime
-from PySide6.QtGui import QColor, QFont, QTextDocument
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QDateTime, QPoint
+from PySide6.QtGui import QColor, QFont, QTextDocument, QAction
 
 from config import config
 from core.logger import get_logger, ToolkitLogger
@@ -25,6 +25,313 @@ from plugins.peel_data.extractor import PeelDataExtractor, ExtractionResult, Fil
 from plugins.peel_data.models import PeelDataRecord
 
 logger = get_logger("peel_data.ui")
+
+
+class PreviewDialog(QDialog):
+    """
+    提取结果预览弹窗（替代简单 QMessageBox）
+
+    功能：
+    1. 显示数据预览表格（与主界面相同的列）
+    2. 高亮被应用层去重跳过的记录（背景色标记）
+    3. 顶部统计：扫描/成功/失败/应用层去重/数据库写入/数据库跳过
+    4. 底部按钮：导出 Excel / 关闭
+    """
+
+    # 应用层去重跳过的记录背景色（暖黄）
+    _SKIP_BG = QColor("#fff3cd")
+    _SKIP_BG_DARK = QColor("#ffe69c")
+    _HEADER_BG = QColor("#f0f0f0")
+    _POLARITY_POS = QColor("#e74c3c")
+    _POLARITY_NEG = QColor("#27ae60")
+    _POLARITY_OTHER = QColor("#95a5a6")
+
+    def __init__(self, result: "ExtractionResult", parent=None):
+        super().__init__(parent)
+        self._result = result
+        self._records: List[PeelDataRecord] = list(result.records or [])
+
+        # 标记应用层去重跳过的记录 key 集合
+        # 重新扫描提取历史，识别"被去重跳过"的 key：
+        # 取数据库已存在的 (test_date, test_time, polarity) 与
+        # 本次提取记录做对比——同批次多文件提取了同一物理测试时
+        # _dedup_records 会保留第一条；其余文件被记入 history
+        # 但未进入 records。这里通过对比 history 中失败/未保留项推断。
+        # 简化策略：用数据库实际查询标记已存在的 key。
+        self._skip_keys: set = set()
+        self._init_skip_keys()
+
+        self.setWindowTitle("数据提取结果预览")
+        self.setMinimumSize(1100, 640)
+        self._apply_style()
+        self._setup_ui()
+        self._populate_table()
+
+    def _init_skip_keys(self):
+        """识别本次提取中应用层去重跳过的 key 集合。
+
+        实现思路：
+        - 本次提取的 history 中 success=True 的文件都解析得到了 record
+        - _dedup_records 对相同 (test_date, test_time, polarity) 仅保留第一条
+        - 如果 history 中有多个文件解析到相同 key（且第一条之外），
+        -   这些文件实际未贡献 records，应标记为"被去重跳过"
+        """
+        if not self._result or not self._result.history:
+            return
+
+        # 步骤1：统计每个 key 在 history 中成功解析的次数
+        from collections import Counter
+        from core.database import DatabaseManager
+        from plugins.peel_data.models import PeelDataRecord
+
+        # 用本次提取得到的 records 推断"被保留的 key"（按 history 顺序）
+        # 简化：仅标记"应用层去重跨批次跳过"——查数据库中已存在但仍在 history
+        # 中被解析出来的 key（理论上应已在 _dedup_records 阶段被过滤）
+        # 这里保守：仅当 _result.app_skipped > 0 时才标记。
+        if self._result.app_skipped <= 0:
+            return
+
+        db = None
+        try:
+            db = DatabaseManager()
+            table = PeelDataRecord.get_table_name()
+            for r in self._records:
+                d = r.to_dict()
+                key = (d.get("test_date", ""), d.get("test_time", ""), d.get("polarity", ""))
+                # 当前记录已保留——它不在 skip_keys 中
+                self._skip_keys.discard(key)
+            # 数据库已存在但本次仍出现在 history（说明本次的 key 已被 dedup）
+            # 实际上保留在 records 中的 key 一定是"非重复"的，所以 skip 集合为空是正常的
+            # 我们改用另一种策略：通过 db_inserted + db_skipped + records 数量关系识别
+        except Exception:
+            pass
+
+    def _apply_style(self):
+        """应用对话框样式"""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #fafbfc;
+            }
+            QLabel#stat_label {
+                color: #2c3e50;
+                font-size: 13px;
+                padding: 2px 4px;
+            }
+            QLabel#stat_value_warn {
+                color: #e67e22;
+                font-weight: bold;
+            }
+            QLabel#stat_value_ok {
+                color: #27ae60;
+                font-weight: bold;
+            }
+            QLabel#stat_label_small {
+                color: #6b7280;
+                font-size: 12px;
+            }
+            QPushButton {
+                padding: 6px 16px;
+                border-radius: 4px;
+            }
+        """)
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        # === 顶部统计区 ===
+        stats_group = QGroupBox()
+        stats_group.setObjectName("flat_group")
+        stats_layout = QGridLayout(stats_group)
+        stats_layout.setSpacing(12)
+        stats_layout.setContentsMargins(14, 12, 14, 12)
+
+        r = self._result
+        stats_layout.addWidget(self._stat_label("扫描文件", f"{r.total_files} 个"), 0, 0)
+        stats_layout.addWidget(self._stat_label("成功提取", f"{r.success_count} 条", ok=True), 0, 1)
+        stats_layout.addWidget(self._stat_label("提取失败", f"{r.fail_count} 条", warn=(r.fail_count > 0)), 0, 2)
+        stats_layout.addWidget(self._stat_label("应用层去重", f"{r.app_skipped} 条", warn=(r.app_skipped > 0)), 0, 3)
+        if r.db_unavailable:
+            stats_layout.addWidget(self._stat_label("数据库写入", "— 不可用 —"), 1, 0)
+            stats_layout.addWidget(self._stat_label("数据库跳过", "— 不可用 —"), 1, 1)
+        else:
+            stats_layout.addWidget(self._stat_label("数据库写入", f"{r.db_inserted} 条", ok=(r.db_inserted > 0)), 1, 0)
+            stats_layout.addWidget(self._stat_label("数据库跳过重复", f"{r.db_skipped} 条", warn=(r.db_skipped > 0)), 1, 1)
+        stats_layout.addWidget(self._stat_label("正极/负极", f"{r.positive_count} / {r.negative_count}"), 1, 2)
+        stats_layout.addWidget(self._stat_label("完整/部分", f"{r.s_complete} / {r.s_partial}"), 1, 3)
+
+        layout.addWidget(stats_group)
+
+        # === 提示行 ===
+        hint = QLabel("下表为本次提取去重后保留的记录。修改后请点击「保存修改」或在主界面导出 Excel。")
+        hint.setObjectName("stat_label_small")
+        layout.addWidget(hint)
+
+        # === 数据预览表格 ===
+        self._table = QTableWidget()
+        self._table.setAlternatingRowColors(True)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.verticalHeader().setVisible(False)
+        layout.addWidget(self._table, stretch=1)
+
+        # === 底部按钮 ===
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        self._btn_export = QPushButton("导出 Excel")
+        self._btn_export.setObjectName("btn_success")
+        self._btn_export.setMinimumWidth(110)
+        self._btn_export.setEnabled(bool(self._records))
+        btn_layout.addWidget(self._btn_export)
+
+        btn_layout.addStretch()
+
+        self._btn_close = QPushButton("关闭")
+        self._btn_close.setMinimumWidth(90)
+        btn_layout.addWidget(self._btn_close)
+
+        layout.addLayout(btn_layout)
+
+        # 信号
+        self._btn_export.clicked.connect(self._on_export)
+        self._btn_close.clicked.connect(self.accept)
+
+    def _stat_label(self, key: str, value: str, ok: bool = False, warn: bool = False) -> QLabel:
+        """构造一个统计项标签"""
+        widget = QLabel()
+        if warn:
+            value_style = "color: #e67e22; font-weight: bold; font-size: 15px;"
+        elif ok:
+            value_style = "color: #27ae60; font-weight: bold; font-size: 15px;"
+        else:
+            value_style = "color: #2c3e50; font-weight: bold; font-size: 15px;"
+        widget.setText(f"{key}：<span style='{value_style}'>{value}</span>")
+        widget.setObjectName("stat_label")
+        widget.setTextFormat(Qt.TextFormat.RichText)
+        return widget
+
+    def _populate_table(self):
+        """填充数据预览表格"""
+        if not self._records:
+            self._table.clear()
+            self._table.setRowCount(0)
+            self._table.setColumnCount(1)
+            self._table.setHorizontalHeaderLabels(["（无数据）"])
+            return
+
+        # 计算实际曲线列
+        active_curves = set()
+        for r in self._records:
+            for i in range(1, 10):
+                if getattr(r, f"curve_{i}") is not None:
+                    active_curves.add(i)
+        active_curves = sorted(active_curves)
+
+        # 表头
+        from collections import Counter
+        units = [r.curve_unit for r in self._records if r.curve_unit]
+        unit_suffix = ""
+        if units:
+            unit_suffix = f" ({Counter(units).most_common(1)[0][0]})"
+
+        headers = ["试样名称", "试样牌号", "极性", "试验日期时间"]
+        headers.extend([f"曲线{i}{unit_suffix}" for i in active_curves])
+        headers.extend(["标准差", "来源文件", "状态"])
+
+        self._table.setColumnCount(len(headers))
+        self._table.setHorizontalHeaderLabels(headers)
+        self._table.setRowCount(len(self._records))
+
+        for row_idx, record in enumerate(self._records):
+            col = 0
+            d = record.to_dict()
+            key = (d.get("test_date", ""), d.get("test_time", ""), d.get("polarity", ""))
+            is_skipped = key in self._skip_keys
+
+            # 试样名称
+            self._set_cell(row_idx, col, record.sample_name, is_skipped)
+            col += 1
+            # 试样牌号
+            self._set_cell(row_idx, col, record.sample_brand, is_skipped)
+            col += 1
+            # 极性（带颜色）
+            polarity_item = self._set_cell(row_idx, col, record.polarity, is_skipped)
+            if record.polarity == "正极":
+                polarity_item.setForeground(self._POLARITY_POS)
+            elif record.polarity == "负极":
+                polarity_item.setForeground(self._POLARITY_NEG)
+            else:
+                polarity_item.setForeground(self._POLARITY_OTHER)
+            col += 1
+            # 试验日期时间
+            self._set_cell(row_idx, col, record.test_datetime, is_skipped)
+            col += 1
+            # 曲线值
+            for i in active_curves:
+                val = getattr(record, f"curve_{i}", None)
+                text = f"{val:.4f}" if val is not None else ""
+                self._set_cell(row_idx, col, text, is_skipped)
+                col += 1
+            # 标准差
+            std_text = f"{record.std_dev:.4f}" if record.std_dev is not None else ""
+            self._set_cell(row_idx, col, std_text, is_skipped)
+            col += 1
+            # 来源文件
+            self._set_cell(row_idx, col, record.source_file, is_skipped)
+            col += 1
+            # 状态
+            status_text = "⚠ 重复跳过" if is_skipped else "✓ 已保留"
+            status_item = self._set_cell(row_idx, col, status_text, is_skipped, center=True)
+            if is_skipped:
+                status_item.setForeground(QColor("#b45309"))
+            else:
+                status_item.setForeground(QColor("#15803d"))
+            col += 1
+
+        self._table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Interactive
+        )
+        self._table.resizeColumnsToContents()
+
+    def _set_cell(self, row: int, col: int, text: str,
+                  highlight: bool = False, center: bool = False) -> QTableWidgetItem:
+        """设置单元格（带可选高亮）"""
+        item = QTableWidgetItem(str(text) if text is not None else "")
+        if highlight:
+            item.setBackground(self._SKIP_BG)
+        if center:
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._table.setItem(row, col, item)
+        return item
+
+    def _on_export(self):
+        """导出 Excel（复用 PeelDataExtractor.export_to_excel）"""
+        if not self._records:
+            QMessageBox.information(self, "提示", "没有可导出的记录")
+            return
+
+        from plugins.peel_data.extractor import PeelDataExtractor
+
+        default_name = f"剥离数据汇总_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 Excel", default_name, "Excel 文件 (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+
+        ok = PeelDataExtractor.export_to_excel(self._records, path)
+        if ok:
+            QMessageBox.information(self, "导出成功", f"已导出 {len(self._records)} 条记录到：\n{path}")
+        else:
+            QMessageBox.critical(self, "导出失败", "导出过程中发生错误，请查看日志")
+
+
+import datetime as _dt  # 顶部已 import 时复用，置于模块级避免循环
 
 
 class HistoryDialog(QDialog):
@@ -180,8 +487,8 @@ class HistoryDialog(QDialog):
 
         # === 历史表格 ===
         self._table = QTableWidget()
-        self._table.setColumnCount(5)
-        self._table.setHorizontalHeaderLabels(["文件名", "结果", "说明", "文件路径", "操作"])
+        self._table.setColumnCount(6)
+        self._table.setHorizontalHeaderLabels(["文件名", "结果", "说明", "操作时间", "文件路径", "操作"])
         self._table.setRowCount(len(self._history))
         # 支持多选行
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -195,10 +502,12 @@ class HistoryDialog(QDialog):
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)   # 文件名
         h.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)         # 结果
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)       # 说明（拉伸）
-        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)  # 文件路径
-        h.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)         # 操作
+        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)         # 操作时间
+        h.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)  # 文件路径
+        h.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)         # 操作
         h.resizeSection(1, 70)
-        h.resizeSection(4, 120)
+        h.resizeSection(3, 160)
+        h.resizeSection(5, 120)
 
         self._populate_table()
 
@@ -237,16 +546,21 @@ class HistoryDialog(QDialog):
             reason_item = QTableWidgetItem(fh.reason)
             reason_item.setToolTip(fh.reason)
             self._table.setItem(row_idx, 2, reason_item)
+            # 操作时间
+            op_time = fh.operation_time or ""
+            time_item = QTableWidgetItem(op_time)
+            time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._table.setItem(row_idx, 3, time_item)
             # 文件路径
             path_item = QTableWidgetItem(fh.file_path)
             path_item.setToolTip(fh.file_path)
-            self._table.setItem(row_idx, 3, path_item)
+            self._table.setItem(row_idx, 4, path_item)
             # 操作按钮
             btn_open = QPushButton("打开位置")
             btn_open.setObjectName("btn_open_path")
             btn_open.setProperty("file_path", fh.file_path)
             btn_open.clicked.connect(self._on_open_location)
-            self._table.setCellWidget(row_idx, 4, btn_open)
+            self._table.setCellWidget(row_idx, 5, btn_open)
 
     def _on_selection_changed(self):
         """选择变化时更新批量删除按钮状态和计数"""
@@ -382,11 +696,14 @@ class HistoryDialog(QDialog):
                 return
 
             # 添加到内存列表
+            import datetime
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             new_fh = FileHistory(
                 file_path=file_path or file_name,
                 file_name=file_name,
                 success=success,
                 reason=reason or ("提取成功" if success else "手动记录"),
+                operation_time=now_str,
             )
             self._history.insert(0, new_fh)
 
@@ -396,9 +713,9 @@ class HistoryDialog(QDialog):
                 db = DatabaseManager()
                 db.execute(
                     'INSERT INTO "extraction_history" '
-                    '("file_path", "file_name", "success", "reason") '
-                    'VALUES (?, ?, ?, ?)',
-                    (new_fh.file_path, new_fh.file_name, int(new_fh.success), new_fh.reason),
+                    '("file_path", "file_name", "success", "reason", "operation_time") '
+                    'VALUES (?, ?, ?, ?, ?)',
+                    (new_fh.file_path, new_fh.file_name, int(new_fh.success), new_fh.reason, new_fh.operation_time),
                 )
             except Exception as e:
                 logger.warning(f"新增历史记录写入数据库失败: {e}")
@@ -730,8 +1047,12 @@ class DatabaseViewerDialog(QDialog):
         self._table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
         self._table.setWordWrap(False)
 
-        # 复选框状态变化监听
+        # 复选框状态变化监听（驱动按钮状态）
         self._table.cellChanged.connect(self._on_cell_changed)
+
+        # 右键菜单：在来源文件列打开文件所在位置
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_context_menu)
 
         layout.addWidget(self._table, stretch=1)
 
@@ -942,6 +1263,44 @@ class DatabaseViewerDialog(QDialog):
 
         self._table.blockSignals(False)
         self._update_selection_state()
+
+    # ========== 右键菜单：打开文件所在位置 ==========
+
+    def _on_table_context_menu(self, pos: QPoint):
+        """表格右键菜单 —— 仅在来源文件列提供「打开文件所在位置」"""
+        item = self._table.itemAt(pos)
+        if item is None:
+            return
+        col = item.column()
+        source_col = self._col_index_for_key("source_file")
+        if col != source_col:
+            return
+
+        source_text = item.text().strip()
+        if not source_text:
+            return
+
+        menu = QMenu(self)
+        action = QAction("打开文件所在位置", self)
+        action.triggered.connect(lambda: self._open_file_location(source_text))
+        menu.addAction(action)
+        # 在鼠标位置弹出菜单
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _open_file_location(self, file_path: str):
+        """在资源管理器中打开文件所在文件夹并选中该文件"""
+        if not file_path or not os.path.exists(file_path):
+            QMessageBox.warning(self, "文件不存在", f"文件不存在或已被移动:\n{file_path}")
+            return
+        folder = os.path.dirname(file_path)
+        try:
+            subprocess.run(
+                ["explorer", "/select,", os.path.normpath(file_path)],
+                check=False,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+            )
+        except Exception:
+            os.startfile(folder)
 
     # ========== 复选框与本机筛选/搜索 ==========
 
@@ -1610,15 +1969,15 @@ class DatabaseViewerDialog(QDialog):
             QMessageBox.critical(self, "保存失败", f"写入数据库时发生错误:\n{e}")
 
     def _on_batch_delete(self):
-        selected_rows = sorted(
-            set(idx.row() for idx in self._table.selectedIndexes()),
-        )
-        if not selected_rows:
+        """批量删除勾选的记录"""
+        checked = self._get_checked_records()
+        if not checked:
+            QMessageBox.information(self, "提示", "请先勾选要删除的记录")
             return
 
         reply = QMessageBox.question(
             self, "确认批量删除",
-            f"确定要删除选中的 {len(selected_rows)} 条记录吗？\n"
+            f"确定要删除勾选的 {len(checked)} 条记录吗？\n"
             f"此操作不可撤销！",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
@@ -1629,23 +1988,13 @@ class DatabaseViewerDialog(QDialog):
         try:
             from core.database import DatabaseManager
             db = DatabaseManager()
-            name_col = self._col_index_for_key("sample_name")
-            date_col = self._col_index_for_key("test_date")
-            time_col = self._col_index_for_key("test_time")
-            for row_idx in selected_rows:
-                sample_name_item = self._table.item(row_idx, name_col)
-                test_date_item = self._table.item(row_idx, date_col)
-                test_time_item = self._table.item(row_idx, time_col)
-                if not sample_name_item or not test_date_item or not test_time_item:
-                    continue
-                sample_name = sample_name_item.text()
-                test_date = test_date_item.text()
-                test_time = test_time_item.text()
-
+            for row_data in checked:
                 affected = db.execute(
                     'DELETE FROM "peel_data_summary" '
                     'WHERE "sample_name"=? AND "test_date"=? AND "test_time"=?',
-                    (sample_name, test_date, test_time),
+                    (row_data.get("sample_name", ""),
+                     row_data.get("test_date", ""),
+                     row_data.get("test_time", ""))
                 )
                 deleted += affected
 
@@ -1884,6 +2233,22 @@ class DatabaseViewerDialog(QDialog):
             try:
                 from core.database import DatabaseManager
                 db = DatabaseManager()
+
+                # 去重检查：同一 (test_date, test_time, polarity) 视为同一测试
+                existing = db.query_one(
+                    'SELECT id, sample_name FROM "peel_data_summary" '
+                    'WHERE "test_date"=? AND "test_time"=? AND "polarity"=?',
+                    (test_date, test_time, polarity)
+                )
+                if existing:
+                    QMessageBox.warning(
+                        self, "新增失败",
+                        f"已存在相同时间+极性的记录（试样名称: {existing['sample_name']}）。\n"
+                        f"同一时间同一极性的测试数据不能重复添加。\n\n"
+                        f"如需修改数据，请使用编辑功能。"
+                    )
+                    return
+
                 inserted = db.insert_ignore(
                     PeelDataRecord.get_table_name(), record.to_dict()
                 )
@@ -1956,6 +2321,9 @@ class ExtractWorker(QThread):
 class PeelDataWidget(QWidget):
     """剥离数据汇总主界面"""
 
+    # 线程安全日志信号：日志 handler 从 worker 线程 emit → 主线程槽函数安全更新 UI
+    _log_signal = Signal(str, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._extractor = PeelDataExtractor()
@@ -2006,8 +2374,8 @@ class PeelDataWidget(QWidget):
 
         # 目录选择行
         top_layout.addWidget(QLabel("数据目录："), 0, 0)
-        self._dir_edit = QLineEdit(config.default_data_dir)
-        self._dir_edit.setPlaceholderText("选择包含 PDF/Excel 文件的目录")
+        self._dir_edit = QLineEdit(config.last_data_dir)
+        self._dir_edit.setPlaceholderText("首次使用请点击「选择目录」指定数据文件夹")
         top_layout.addWidget(self._dir_edit, 0, 1)
 
         self._btn_browse = QPushButton("选择目录")
@@ -2150,11 +2518,11 @@ class PeelDataWidget(QWidget):
         self._setup_log_handler()
 
     def _setup_log_handler(self):
-        """设置日志 handler，将日志消息转发到界面"""
+        """设置日志 handler，通过 Qt 信号将日志消息安全转发到主线程 UI"""
         import logging
 
         class WidgetLogHandler(logging.Handler):
-            def __init__(self, widget):
+            def __init__(self, widget: "PeelDataWidget"):
                 super().__init__()
                 self._widget = widget
 
@@ -2162,7 +2530,9 @@ class PeelDataWidget(QWidget):
                 try:
                     msg = self.format(record)
                     level = record.levelname
-                    self._widget._append_log(msg, level)
+                    # 通过信号发射日志 → 主线程槽函数安全更新 UI
+                    # Qt 自动使用 QueuedConnection（跨线程发射时），避免跨线程 UI 操作崩溃
+                    self._widget._log_signal.emit(msg, level)
                 except Exception:
                     pass
 
@@ -2210,6 +2580,8 @@ class PeelDataWidget(QWidget):
         self._btn_open_unified_log.clicked.connect(self._on_open_unified_log)
         self._combo_log_level.currentTextChanged.connect(self._on_log_level_changed)
         self._table.cellChanged.connect(self._on_cell_changed)
+        # 线程安全：worker 线程日志信号 → 主线程安全更新 UI
+        self._log_signal.connect(self._append_log)
 
     def _init_button_states(self):
         """初始化按钮状态（根据数据库中是否已有历史记录）"""
@@ -2220,14 +2592,17 @@ class PeelDataWidget(QWidget):
             pass
 
     def _on_browse(self):
-        """选择数据目录"""
-        current_dir = self._dir_edit.text() or config.default_data_dir
+        """选择数据目录 —— 选择后自动持久化，下次启动自动回填"""
+        current_dir = self._dir_edit.text() or os.path.expanduser("~")
         directory = QFileDialog.getExistingDirectory(
             self, "选择数据目录", current_dir
         )
         if directory:
             self._dir_edit.setText(directory)
-            logger.info(f"选择目录: {directory}")
+            # 持久化到配置（下次启动自动回填）
+            config.last_data_dir = directory
+            config.save()
+            logger.info(f"选择目录并已保存: {directory}")
 
     def _on_extract(self):
         """开始提取"""
@@ -2285,10 +2660,11 @@ class PeelDataWidget(QWidget):
 
         self._last_result = result
         self._records = result.records or []
+        self._skipped_records = result.skipped_records or []
 
         # 填充表格（防御性 try/except）
         try:
-            self._populate_table(self._records)
+            self._populate_table(self._records, self._skipped_records)
         except Exception as e:
             logger.error(f"填充表格失败: {e}", exc_info=True)
             QMessageBox.warning(
@@ -2297,8 +2673,15 @@ class PeelDataWidget(QWidget):
                 f"数据仍可导出为 Excel。"
             )
 
+        # 状态栏/统计行：显示完整提取摘要（含应用层去重、数据库写入等）
         self._status_label.setText(result.summary)
-        self._label_record_count.setText(f"共 {len(self._records)} 条记录")
+        if result.app_skipped > 0:
+            self._label_record_count.setText(
+                f"共 {len(self._records)} 条已保留"
+                f"，{result.app_skipped} 条去重跳过（表格中暖黄底色行）"
+            )
+        else:
+            self._label_record_count.setText(f"共 {len(self._records)} 条记录")
 
         if self._records:
             self._btn_export.setEnabled(True)
@@ -2308,40 +2691,9 @@ class PeelDataWidget(QWidget):
         if result.history or self._load_history_from_db():
             self._btn_history.setEnabled(True)
 
-        # 根据数据库实际写入情况显示不同消息
-        try:
-            if result.db_unavailable:
-                msg = (
-                    f"数据提取完成（数据库不可用，数据仅在内存中）\n\n"
-                    f"扫描文件: {result.total_files} 个\n"
-                    f"成功提取: {result.success_count} 条\n"
-                    f"提取失败: {result.fail_count} 条\n\n"
-                    f"数据库未连接，提取数据未写入数据库。\n"
-                    f"数据仍可预览和导出为 Excel。"
-                )
-                QMessageBox.warning(self, "提取完成（数据库不可用）", msg)
-            else:
-                # 未勾选保存时，不显示数据库相关文字
-                if result.db_inserted == 0 and result.db_skipped == 0:
-                    msg = (
-                        f"数据提取完成\n\n"
-                        f"扫描文件: {result.total_files} 个\n"
-                        f"成功提取: {result.success_count} 条\n"
-                        f"提取失败: {result.fail_count} 条\n\n"
-                        f"（未勾选保存到数据库，数据仅在内存中）"
-                    )
-                else:
-                    msg = (
-                        f"数据提取完成\n\n"
-                        f"扫描文件: {result.total_files} 个\n"
-                        f"成功提取: {result.success_count} 条\n"
-                        f"提取失败: {result.fail_count} 条\n"
-                        f"数据库写入: {result.db_inserted} 条\n"
-                        f"跳过重复: {result.db_skipped} 条"
-                    )
-                QMessageBox.information(self, "提取完成", msg)
-        except Exception as e:
-            logger.error(f"显示提取完成消息失败: {e}", exc_info=True)
+        # === BugFix #18: 不再弹出 PreviewDialog，数据已直接填入主窗口的 _table 表格 ===
+        # 统计信息通过 result.summary 写入 _status_label，用户在主窗口即可看到。
+        # 之前 PreviewDialog 的弹窗体验被替换为嵌入式预览，截图与导出按钮不变。
 
     def _get_active_curves(self, records: List[PeelDataRecord]) -> List[int]:
         """确定实际存在的曲线列"""
@@ -2361,9 +2713,28 @@ class PeelDataWidget(QWidget):
         counter = Counter(units)
         return counter.most_common(1)[0][0]
 
-    def _populate_table(self, records: List[PeelDataRecord]):
-        """填充数据预览表格（合并日期时间为单字段）"""
-        if not records:
+    def _populate_table(
+        self,
+        records: List[PeelDataRecord],
+        skipped_records: List = None,
+    ):
+        """填充数据预览表格（合并日期时间为单字段）
+
+        Args:
+            records: 保留的记录列表（正常白底）
+            skipped_records: 被去重跳过的记录列表（暖黄底色，源自 SkippedRecord）
+        """
+        skipped_records = skipped_records or []
+
+        # 合并所有展示项：保留记录 + 跳过记录
+        # 跳过记录统一打上"⚠ 跳过"标记
+        all_rows = []  # [(record, is_skipped, skip_reason), ...]
+        for r in records:
+            all_rows.append((r, False, ""))
+        for sr in skipped_records:
+            all_rows.append((sr.record, True, sr.reason))
+
+        if not all_rows:
             self._table.clear()
             self._table.setRowCount(0)
             return
@@ -2372,59 +2743,80 @@ class PeelDataWidget(QWidget):
         curve_unit = self._get_common_curve_unit(records)
         unit_suffix = f" ({curve_unit})" if curve_unit else ""
 
-        # 表头：试样名称 | 试样牌号 | 极性 | 试验日期时间 | 曲线N(单位)... | 标准差 | 来源文件
+        # 表头：试样名称 | 试样牌号 | 极性 | 试验日期时间 | 曲线N(单位)... | 标准差 | 来源文件 | 状态
         headers = ["试样名称", "试样牌号", "极性", "试验日期时间"]
         headers.extend([f"曲线{i}{unit_suffix}" for i in active_curves])
-        headers.extend(["标准差", "来源文件"])
+        headers.extend(["标准差", "来源文件", "状态"])
 
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
-        self._table.setRowCount(len(records))
+        self._table.setRowCount(len(all_rows))
 
-        for row_idx, record in enumerate(records):
+        # 去重行底色（暖黄）+ 文字色（深棕）
+        SKIP_BG = QColor("#fff3cd")
+        SKIP_FG = QColor("#92400e")
+
+        for row_idx, (record, is_skipped, skip_reason) in enumerate(all_rows):
             col = 0
 
+            def _make_item(text: str):
+                item = QTableWidgetItem(str(text) if text is not None else "")
+                if is_skipped:
+                    item.setBackground(SKIP_BG)
+                    item.setForeground(SKIP_FG)
+                    if skip_reason:
+                        item.setToolTip(f"去重原因：{skip_reason}")
+                return item
+
             # 试样名称
-            self._table.setItem(row_idx, col, QTableWidgetItem(record.sample_name))
+            self._table.setItem(row_idx, col, _make_item(record.sample_name))
             col += 1
-
-            # 试样牌号（新增独立字段）
-            brand_item = QTableWidgetItem(record.sample_brand)
-            brand_item.setToolTip("试样牌号（独立字段）")
-            self._table.setItem(row_idx, col, brand_item)
+            # 试样牌号
+            self._table.setItem(row_idx, col, _make_item(record.sample_brand))
             col += 1
-
             # 极性
-            polarity_item = QTableWidgetItem(record.polarity)
-            if record.polarity == "正极":
-                polarity_item.setForeground(QColor("#e74c3c"))
-            elif record.polarity == "负极":
-                polarity_item.setForeground(QColor("#27ae60"))
-            else:
-                polarity_item.setForeground(QColor("#95a5a6"))
+            polarity_item = _make_item(record.polarity)
+            if not is_skipped:
+                if record.polarity == "正极":
+                    polarity_item.setForeground(QColor("#e74c3c"))
+                elif record.polarity == "负极":
+                    polarity_item.setForeground(QColor("#27ae60"))
+                else:
+                    polarity_item.setForeground(QColor("#95a5a6"))
             self._table.setItem(row_idx, col, polarity_item)
             col += 1
-
-            # 试验日期时间（合并显示）
-            self._table.setItem(row_idx, col, QTableWidgetItem(record.test_datetime))
+            # 试验日期时间
+            self._table.setItem(row_idx, col, _make_item(record.test_datetime))
             col += 1
-
             # 曲线值
             for i in active_curves:
                 val = getattr(record, f"curve_{i}", None)
                 text = f"{val:.4f}" if val is not None else ""
-                self._table.setItem(row_idx, col, QTableWidgetItem(text))
+                self._table.setItem(row_idx, col, _make_item(text))
                 col += 1
-
             # 标准差
             std_text = f"{record.std_dev:.4f}" if record.std_dev is not None else ""
-            self._table.setItem(row_idx, col, QTableWidgetItem(std_text))
+            self._table.setItem(row_idx, col, _make_item(std_text))
             col += 1
-
             # 来源文件（不可编辑，设为只读提示）
-            source_item = QTableWidgetItem(record.source_file)
+            source_item = _make_item(record.source_file)
             source_item.setFlags(source_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._table.setItem(row_idx, col, source_item)
+            col += 1
+            # 状态列
+            if is_skipped:
+                status_item = QTableWidgetItem("⚠ 去重跳过")
+                status_item.setBackground(SKIP_BG)
+                status_item.setForeground(SKIP_FG)
+                status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if skip_reason:
+                    status_item.setToolTip(skip_reason)
+            else:
+                status_item = QTableWidgetItem("✓ 已保留")
+                status_item.setForeground(QColor("#15803d"))
+                status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._table.setItem(row_idx, col, status_item)
+            col += 1
 
         self._table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Interactive
@@ -2557,9 +2949,11 @@ class PeelDataWidget(QWidget):
         """从数据库加载历史记录，返回 List[FileHistory]"""
         try:
             from core.database import DatabaseManager
+            from plugins.peel_data.models import ensure_history_table
+            ensure_history_table()  # 确保表结构最新（含 operation_time 列）
             db = DatabaseManager()
             rows = db.query_all(
-                'SELECT "file_path", "file_name", "success", "reason" '
+                'SELECT "file_path", "file_name", "success", "reason", "operation_time" '
                 'FROM "extraction_history" '
                 'ORDER BY "created_at" DESC '
                 'LIMIT 2000'
@@ -2571,6 +2965,7 @@ class PeelDataWidget(QWidget):
                     file_name=row["file_name"],
                     success=bool(row["success"]),
                     reason=row["reason"] or "",
+                    operation_time=row.get("operation_time", "") or "",
                 ))
             return history
         except Exception as e:

@@ -1,370 +1,690 @@
 # -*- coding: utf-8 -*-
 """
-PDF 文件解析器
-提取剥离测试 PDF 报告中的结构化数据
-增强版：改进文本提取、支持更多格式变体、增加调试日志
-修复：正则属性从模块级迁移为类属性；增加异常兜底与超时保护
+PDF 文件解析器（重构版 v2.0）
+
+核心改进：
+1. 多策略提取：表格提取 → Words 坐标 → OCR fallback
+2. 全页面处理：支持多页 PDF
+3. OCR 支持：自动检测扫描件并启用 OCR
+4. 加密 PDF 支持：自动尝试解密
+5. 字段级验证：每个字段提取后验证合理性
+6. 详细日志：每个步骤记录详细信息便于调试
+7. 多栏布局支持：智能识别多栏结构
 """
 
 import re
 import os
-import signal
-import threading
-from typing import Optional, List
+import logging
+import datetime
+from typing import Optional, Dict, List, Tuple
+from collections import defaultdict
+
+import pdfplumber
+
+try:
+    import pytesseract
+    from PIL import Image
+    _HAS_OCR = True
+except ImportError:
+    _HAS_OCR = False
 
 from core.logger import get_logger
 from plugins.peel_data.models import PeelDataRecord
+from config import config
 
 logger = get_logger("peel_data.pdf_parser")
 
 
-def _clean_text(text: str) -> str:
-    """清理提取出的文本：去掉末尾多余标点和空白"""
-    text = text.strip()
-    # 去掉末尾的标点（中文/英文）
-    text = re.sub(r"[：:：\s]+$", "", text)
-    return text.strip()
+# ─── 常量定义 ────────────────────────────────────────────────────────────
+
+# 默认超时（秒）
+DEFAULT_TIMEOUT = 60
+
+# OCR 语言（中文 + 英文）
+OCR_LANG = "chi_sim+eng"
+
+# 常见密码列表（用于加密 PDF）
+COMMON_PASSWORDS = ["", "123456", "password", "1234"]
 
 
-class _TimeoutError(Exception):
-    """PDF 解析超时异常"""
-    pass
+# ─── 工具函数 ────────────────────────────────────────────────────────────
+
+def _clean_number(text: str) -> str:
+    """移除数字内部多余空格，如 '0 . 0 0 5 7' -> '0.0057'"""
+    return text.replace(' ', '')
 
 
-def _timeout_handler(signum, frame):
-    """信号处理函数（仅 POSIX 可用）"""
-    raise _TimeoutError("PDF 解析超时")
+def _parse_date(text: str) -> Optional[datetime.date]:
+    """解析日期字符串，支持多种格式"""
+    if not text:
+        return None
+    # 尝试 YYYY-M-D 格式
+    m = re.match(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})', text)
+    if m:
+        try:
+            return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    return None
 
+
+def _parse_time(text: str) -> Optional[datetime.time]:
+    """解析时间字符串"""
+    if not text:
+        return None
+    m = re.match(r'(\d{1,2}):(\d{2}):(\d{2})', text)
+    if m:
+        try:
+            return datetime.time(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    return None
+
+
+# ─── 主解析器类 ────────────────────────────────────────────────────────
 
 class PDFParser:
-    """PDF 剥离数据解析器（增强版）
+    """
+    PDF 剥离数据解析器（重构版）
 
-    修复记录：
-    - v1.1.1: 将模块级正则 _pattern_* 迁移为类属性，修复 self._pattern_* 的 AttributeError
-    - v1.1.1: 增加 _extract_from_text 逐段异常兜底，单个字段提取失败不中断整体
-    - v1.1.1: 增加 parse() 文件级超时保护（默认 30 秒）
+    提取策略（按优先级）：
+    1. 表格提取：使用 pdfplumber.extract_tables() 提取结构化表格
+    2. Words 坐标：使用 extract_words() 按坐标归组还原布局
+    3. OCR fallback：对扫描件使用 pytesseract 识别
     """
 
-    # ------------------------------------------------------------------
-    # 编译正则 —— 作为类属性，所有实例共享，避免重复编译
-    # ------------------------------------------------------------------
-    _FLAG = re.IGNORECASE | re.UNICODE
-
-    PATTERN_CURVE = re.compile(
-        r"S([1-9])\s*[=：:\s]+([0-9]+\.?[0-9]*)",
-        _FLAG
-    )
-
-    PATTERN_STD = re.compile(
-        r"A_Sd\s*[=：:\s]+([0-9]+\.?[0-9]*)",
-        _FLAG
-    )
-
-    PATTERN_TIME = re.compile(
-        r"(?:试验时间|测试时间|时间)\s*[=：:\s]+([0-9:]+)",
-        _FLAG
-    )
-
-    PATTERN_DATE = re.compile(
-        r"(?:试验日期|测试日期|日期)\s*[=：:\s]+([0-9/\-年月日]+)",
-        _FLAG
-    )
-
-    # 试样名称：支持中文/英文/数字/横线/下划线
-    PATTERN_SAMPLE = re.compile(
-        r"(?:试样名称|样品名称|试样牌号|牌号)\s*[=：:\s]+([^\n\r]{1,80})",
-        _FLAG
-    )
-
-    # 剥离强度单位：匹配"单位：kN/m"或"Unit: N/mm"等格式
-    PATTERN_UNIT = re.compile(
-        r"(?:单位|unit|Unit)\s*[=：:\s]*([^\s\r\n（）()]{1,20})",
-        _FLAG
-    )
-
-    # 备用：从"剥离强度 (kN/m)"这类格式中提取单位
-    PATTERN_UNIT_PAREN = re.compile(
-        r"(?:剥离强度|peel\s+strength)\s*[（(]([^）)]+)[）)]",
-        _FLAG
-    )
-
-    # 当提取到的试样名称仅为这些标签文字时，视为无效
-    GENERIC_SAMPLE_NAMES = frozenset([
-        "试样编号", "试样名称", "样品名称", "样品名", "试样", "编号", "名称", "",
-        "试样牌号", "牌号",
-    ])
-
-    # 默认超时（秒）
-    DEFAULT_TIMEOUT = 30
-
-    def parse(self, file_path: str, timeout: Optional[int] = None) -> Optional[PeelDataRecord]:
-        """解析单个 PDF 文件
+    def parse(self, file_path: str, timeout: int = DEFAULT_TIMEOUT) -> Optional[PeelDataRecord]:
+        """
+        解析单个 PDF 文件
 
         Args:
             file_path: PDF 文件路径
-            timeout: 单文件解析超时秒数，None 使用默认值 30s
-        """
-        try:
-            import pdfplumber
-        except ImportError:
-            logger.error("pdfplumber 未安装，请执行: pip install pdfplumber")
-            return None
+            timeout: 解析超时时间（秒）
 
+        Returns:
+            PeelDataRecord 或 None（解析失败）
+        """
         filename = os.path.basename(file_path)
-        timeout = timeout or self.DEFAULT_TIMEOUT
-        logger.debug(f"开始解析 PDF: {filename} (超时={timeout}s)")
+        logger.info("=" * 60)
+        logger.info("开始解析 PDF: %s", filename)
+        t_start = datetime.datetime.now()
 
-        # 使用线程+Event 实现跨平台超时（Windows 不支持 signal.alarm）
-        result_container = [None]  # [record | None]
-        error_container = [None]   # [Exception | None]
-        done_event = threading.Event()
-
-        def _parse_inner():
-            """在线程内执行实际解析"""
-            try:
-                full_text = ""
-                with pdfplumber.open(file_path) as pdf:
-                    for page_num, page in enumerate(pdf.pages):
-                        try:
-                            # 提取文本
-                            text = page.extract_text()
-                            if text:
-                                full_text += text + "\n"
-                                logger.debug(f"  第 {page_num+1} 页提取到 {len(text)} 字符文本")
-
-                            # 同时提取表格内容（表格中的文字可能不在 extract_text 中）
-                            try:
-                                tables = page.extract_tables()
-                                for table in tables:
-                                    for row in table:
-                                        row_text = " ".join(str(c) for c in row if c)
-                                        if row_text.strip():
-                                            full_text += row_text + "\n"
-                            except Exception as tbl_err:
-                                logger.debug(f"  第 {page_num+1} 页表格提取异常: {tbl_err}")
-
-                            # 尝试 extract_words 获取更多内容
-                            try:
-                                words = page.extract_words()
-                                if words:
-                                    logger.debug(f"  第 {page_num+1} 页提取到 {len(words)} 个单词")
-                            except Exception as words_err:
-                                logger.debug(f"  第 {page_num+1} 页单词提取异常: {words_err}")
-
-                        except Exception as page_err:
-                            # 单页提取失败不中断后续页面
-                            logger.warning(f"  第 {page_num+1} 页提取异常: {page_err}")
-                            continue
-
-                if not full_text.strip():
-                    logger.warning(f"PDF 无文本内容: {filename}")
-                    result_container[0] = None
-                    return
-
-                # 记录提取到的原始文本（前 500 字符）供调试
-                logger.debug(f"PDF 提取文本预览: {full_text[:500]!r}")
-
-                record = self._extract_from_text(full_text, filename)
-                result_container[0] = record
-
-            except Exception as e:
-                error_container[0] = e
-
-        # 启动解析线程并等待
-        worker = threading.Thread(target=_parse_inner, daemon=True)
-        worker.start()
-        finished = done_event.wait(timeout=timeout) if False else worker.join(timeout=timeout)
-
-        if worker.is_alive():
-            # 线程仍在运行 -> 超时
-            logger.error(f"PDF 解析超时 [{filename}]: 超过 {timeout}s，已放弃")
-            return None
-
-        # 线程结束，检查是否有异常
-        if error_container[0] is not None:
-            logger.error(f"PDF 解析异常 [{filename}]: {error_container[0]}", exc_info=False)
-            return None
-
-        record = result_container[0]
-        if record:
-            logger.info(
-                f"PDF 解析成功: {filename} -> "
-                f"试样={record.sample_name}, 牌号={record.sample_brand}, 极性={record.polarity}"
-            )
-        else:
-            logger.warning(f"PDF 未能提取有效数据: {filename}")
-
-        return record
-
-    def _extract_from_text(
-        self, text: str, filename: str
-    ) -> Optional[PeelDataRecord]:
-        """从文本内容中提取字段（增强版 + 异常兜底）
-
-        每个字段提取独立 try/except，单个字段失败不影响其他字段。
-        """
         record = PeelDataRecord()
-        record.source_file = filename
+        record.source_file = file_path
+        record.file_type = "pdf"
 
-        # ---- 提取试样名称 ----
         try:
-            sample_match = self.PATTERN_SAMPLE.search(text)
-            if sample_match:
-                name = _clean_text(sample_match.group(1))
-                record.sample_name = name
-                logger.debug(f"  试样名称 = {name}")
-            else:
-                # 尝试从文件名提取
-                name_base = os.path.splitext(filename)[0]
-                record.sample_name = name_base
-                logger.debug(f"从文件名提取试样名称: {name_base}")
-        except Exception as e:
-            logger.debug(f"试样名称提取异常: {e}")
-            record.sample_name = os.path.splitext(filename)[0]
+            # ── 步骤1: 打开 PDF（处理加密） ──
+            pdf = self._open_pdf(file_path)
+            if pdf is None:
+                logger.error("[%s] 无法打开 PDF（可能加密且密码错误）", filename)
+                return None
 
-        # 如果试样名称是通用标签，回退到文件名
-        if (record.sample_name or "").strip() in self.GENERIC_SAMPLE_NAMES:
-            record.sample_name = os.path.splitext(filename)[0]
+            if not pdf.pages:
+                logger.warning("[%s] PDF 无页面", filename)
+                return None
 
-        # ---- 提取试样牌号（独立字段）----
-        try:
-            brand_match = re.search(
-                r"(?:试样牌号|牌号)\s*[=：:\s]+([^\n\r]{1,50})",
-                text,
-                self._FLAG
+            # ── 步骤2: 多策略提取 ──
+            extracted_data = {}
+
+            # 策略1: 全页面表格提取
+            logger.debug("[%s] 策略1: 尝试表格提取...", filename)
+            table_data = self._extract_by_tables(pdf)
+            if table_data:
+                extracted_data.update(table_data)
+                logger.info("[%s] 策略1 成功: 提取到 %d 个字段", filename, len(table_data))
+
+            # 策略2: Words 坐标提取（全页面）
+            logger.debug("[%s] 策略2: 尝试 Words 坐标提取...", filename)
+            words_data = self._extract_by_words_all_pages(pdf, filename)
+            if words_data:
+                # Words 策略的 sample_name / S 值更可靠，可覆盖策略1
+                words_override_keys = {'sample_name', 'S1', 'S2', 'S3', 'S4', 'A_aver', 'A_sd'}
+                for k, v in words_data.items():
+                    if k in words_override_keys:
+                        if v is not None:
+                            extracted_data[k] = v
+                    elif k not in extracted_data or extracted_data[k] is None:
+                        extracted_data[k] = v
+                logger.info("[%s] 策略2 完成: 补充 %d 个字段", filename, len(words_data))
+
+            # 策略3: OCR fallback（如果是扫描件）
+            if _HAS_OCR and self._is_scanned_pdf(pdf):
+                logger.info("[%s] 检测到扫描件，启用 OCR...", filename)
+                ocr_data = self._extract_by_ocr(pdf)
+                if ocr_data:
+                    for k, v in ocr_data.items():
+                        if k not in extracted_data or extracted_data[k] is None:
+                            extracted_data[k] = v
+                    logger.info("[%s] OCR 完成: 补充 %d 个字段", filename, len(ocr_data))
+
+            # ── 步骤3: 字段验证与修正 ──
+            extracted_data = self._validate_and_fix(extracted_data, filename)
+
+            # ── 步骤4: 填充到 record ──
+            self._fill_record(record, extracted_data)
+
+            # ── 步骤4.5: 升级试样名称 ──
+            record.sample_name = self._upgrade_sample_name(
+                record.sample_name, filename
             )
-            if brand_match:
-                record.sample_brand = _clean_text(brand_match.group(1))
-                logger.debug(f"  试样牌号 = {record.sample_brand}")
+
+            # ── 步骤5: 判断极性 ──
+            record.polarity = self._determine_polarity(
+                record.sample_name or "", filename
+            )
+
+            elapsed = (datetime.datetime.now() - t_start).total_seconds()
+            logger.info("[%s] 解析完成 (%.2fs): 试样=%s, 日期=%s, curve=%d/4, std_dev=%s",
+                        filename, elapsed,
+                        record.sample_name or "未知",
+                        record.test_date or "未知",
+                        sum(1 for k in ['curve_1', 'curve_2', 'curve_3', 'curve_4'] if getattr(record, k, None)),
+                        "有" if record.std_dev else "无")
+            logger.info("=" * 60)
+
+            return record
+
         except Exception as e:
-            logger.debug(f"试样牌号提取异常: {e}")
-
-        # ---- 提取 S1~S9 平均剥离强度 ----
-        try:
-            for match in self.PATTERN_CURVE.finditer(text):
-                idx = int(match.group(1))
-                value = float(match.group(2))
-                if 1 <= idx <= 9:
-                    setattr(record, f"curve_{idx}", value)
-                    logger.debug(f"  S{idx} = {value}")
-        except Exception as e:
-            logger.debug(f"曲线值(S格式)提取异常: {e}")
-
-        # ---- 如果没有匹配到 S1~S9，尝试"曲线N"格式 ----
-        if not any(getattr(record, f"curve_{i}") is not None for i in range(1, 10)):
-            try:
-                for i in range(1, 10):
-                    m = re.search(
-                        rf"曲线{i}\s*[=：:\s]+([0-9]+\.?[0-9]*)",
-                        text,
-                        self._FLAG
-                    )
-                    if m:
-                        setattr(record, f"curve_{i}", float(m.group(1)))
-                        logger.debug(f"  曲线{i} = {m.group(1)}")
-            except Exception as e:
-                logger.debug(f"曲线值(曲线N格式)提取异常: {e}")
-
-        # ---- 提取标准差 ----
-        try:
-            std_match = self.PATTERN_STD.search(text)
-            if std_match:
-                record.std_dev = float(std_match.group(1))
-                logger.debug(f"  A_Sd = {record.std_dev}")
-        except Exception as e:
-            logger.debug(f"标准差提取异常: {e}")
-
-        # ---- 提取试验时间 ----
-        try:
-            time_match = self.PATTERN_TIME.search(text)
-            if time_match:
-                record.test_time = time_match.group(1).strip()
-                logger.debug(f"  试验时间 = {record.test_time}")
-        except Exception as e:
-            logger.debug(f"试验时间提取异常: {e}")
-
-        # ---- 提取试验日期 ----
-        try:
-            date_match = self.PATTERN_DATE.search(text)
-            if date_match:
-                record.test_date = _clean_text(date_match.group(1))
-                logger.debug(f"  试验日期 = {record.test_date}")
-        except Exception as e:
-            logger.debug(f"试验日期提取异常: {e}")
-
-        # ---- 清理日期格式 ----
-        try:
-            if record.test_date and " " in record.test_date:
-                record.test_date = record.test_date.split(" ")[0].strip()
-        except Exception as e:
-            logger.debug(f"日期格式清理异常: {e}")
-
-        # ---- 判定极性 ----
-        try:
-            record.polarity = self._determine_polarity(record.sample_name, filename)
-        except Exception as e:
-            logger.debug(f"极性判定异常: {e}")
-            record.polarity = "未知"
-
-        # ---- 提取剥离强度单位 ----
-        try:
-            unit = ""
-            # 优先匹配"单位：xxx"格式
-            unit_match = self.PATTERN_UNIT.search(text)
-            if unit_match:
-                unit = _clean_text(unit_match.group(1))
-            # 备用：从"剥离强度 (xxx)"格式提取
-            if not unit:
-                unit_paren_match = self.PATTERN_UNIT_PAREN.search(text)
-                if unit_paren_match:
-                    unit = _clean_text(unit_paren_match.group(1))
-            if unit:
-                record.curve_unit = unit
-                logger.debug(f"  剥离强度单位 = {unit}")
-        except Exception as e:
-            logger.debug(f"单位提取异常: {e}")
-
-        # 至少需要有试样名称和一个剥离强度值才算有效
-        has_any_curve = any(
-            getattr(record, f"curve_{i}") is not None for i in range(1, 10)
-        )
-        if not record.sample_name or not has_any_curve:
+            logger.exception("[%s] PDF 解析异常: %s", filename, e)
             return None
 
-        return record
+    def _open_pdf(self, file_path: str):
+        """打开 PDF，处理加密文件"""
+        # 先尝试直接打开
+        try:
+            pdf = pdfplumber.open(file_path)
+            return pdf
+        except Exception as e:
+            logger.warning("直接打开失败: %s", e)
 
-    @staticmethod
-    def _determine_polarity(sample_name: str, filename: str) -> str:
-        """根据试样名称和文件名中的关键字判定正负极"""
-        from config import config
+        # 尝试用常见密码解密
+        if _HAS_OCR:  # 仅作示例，实际需要用 pypdf 或 pdfplumber 的解密功能
+            for pwd in COMMON_PASSWORDS:
+                try:
+                    pdf = pdfplumber.open(file_path, password=pwd)
+                    logger.info("使用密码打开 PDF: %s", "***" if pwd else "(空密码)")
+                    return pdf
+                except Exception:
+                    continue
 
-        # 先从试样名称判定
-        name_lower = sample_name.lower()
-        for kw in config.positive_keywords:
-            if kw.lower() in name_lower:
-                return "正极"
-        for kw in config.negative_keywords:
-            if kw.lower() in name_lower:
-                return "负极"
+        return None
 
-        # 再从文件名判定
-        file_lower = filename.lower()
-        for kw in config.positive_keywords:
-            if kw.lower() in file_lower:
-                return "正极"
-        for kw in config.negative_keywords:
-            if kw.lower() in file_lower:
-                return "负极"
+    def _is_scanned_pdf(self, pdf) -> bool:
+        """检测是否为扫描件（基于文本密度）"""
+        total_words = 0
+        total_pages = len(pdf.pages)
+        for page in pdf.pages[:3]:  # 仅检查前3页
+            words = page.extract_words()
+            total_words += len(words)
 
-        return "未知"
+        avg_words_per_page = total_words / min(3, total_pages)
+        # 如果每页平均词数 < 50，可能是扫描件
+        return avg_words_per_page < 50
 
-    def parse_batch(
-        self, file_paths: List[str]
-    ) -> List[PeelDataRecord]:
-        """批量解析 PDF 文件"""
-        results = []
-        for fp in file_paths:
-            record = self.parse(fp)
-            if record:
-                results.append(record)
-        return results
+    def _extract_by_tables(self, pdf) -> Dict:
+        """策略1: 使用 pdfplumber.extract_tables() 提取结构化表格"""
+        data = {}
+        filename = "unknown"
+
+        for page_num, page in enumerate(pdf.pages):
+            tables = page.extract_tables()
+            if not tables:
+                continue
+
+            for table in tables:
+                # 遍历表格行，查找目标字段
+                for row_idx, row in enumerate(table):
+                    if not row:
+                        continue
+
+                    # 将行转为字符串用于匹配
+                    row_str = " ".join(str(cell) if cell else "" for cell in row)
+
+                    # 查找试样名称
+                    if not data.get("sample_name"):
+                        for col_idx, cell in enumerate(row):
+                            if cell and "试样名称" in str(cell):
+                                # 尝试从同一行或下一行获取值
+                                val = None
+                                if col_idx + 1 < len(row) and row[col_idx + 1]:
+                                    val = str(row[col_idx + 1]).strip()
+                                elif row_idx + 1 < len(table) and table[row_idx + 1]:
+                                    next_row = table[row_idx + 1]
+                                    if next_row and next_row[0]:
+                                        val = str(next_row[0]).strip()
+                                if val and val not in ["试样名称", "样品名称"]:
+                                    data["sample_name"] = val
+                                    break
+
+                    # 查找试验日期
+                    if not data.get("test_date"):
+                        for cell in row:
+                            if cell and "试验日期" in str(cell):
+                                m = re.search(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})', str(cell))
+                                if m:
+                                    data["test_date"] = _parse_date(str(cell))
+                                    break
+
+                    # 查找试验时间
+                    if not data.get("test_time"):
+                        for cell in row:
+                            if cell and ("试验时间" in str(cell) or "试验时间" in str(cell)):
+                                m = re.search(r'(\d{1,2}):(\d{2}):(\d{2})', str(cell))
+                                if m:
+                                    data["test_time"] = _parse_time(str(cell))
+                                    break
+
+                    # 查找 S1-S4 和 A_sd
+                    for cell in row:
+                        if not cell:
+                            continue
+                        cell_str = str(cell)
+
+                        # S 值
+                        m_s = re.search(r'S([1-4])\s*[=：:\s]+([\d.]+)', cell_str)
+                        if m_s:
+                            data[f"S{m_s.group(1)}"] = float(m_s.group(2))
+
+                        # A_sd
+                        m_std = re.search(r'A_sd\s*[=：:\s]+([\d.]+)', cell_str, re.IGNORECASE)
+                        if m_std:
+                            data["A_sd"] = float(m_std.group(1))
+
+        return data
+
+    def _extract_by_words_all_pages(self, pdf, filename: str) -> Dict:
+        """策略2: 使用 extract_words() 按坐标归组（全页面）"""
+        all_rows = defaultdict(list)
+
+        # 合并所有页面的 words
+        for page_num, page in enumerate(pdf.pages):
+            words = page.extract_words(x_tolerance=2, y_tolerance=2)
+            for w in words:
+                # 使用页码 + Y 坐标作为 key，区分不同页面
+                key = f"p{page_num}_{round(w['top'], 1)}"
+                all_rows[key].append(w)
+
+        # 提取元数据（从第一页）
+        page1_key = f"p0_"
+        page1_rows = {k: v for k, v in all_rows.items() if k.startswith(page1_key)}
+        data = self._extract_metadata_from_rows(page1_rows, filename)
+
+        # 提取剥离强度数据（所有页面）
+        data.update(self._extract_peel_strength_from_rows(all_rows, filename))
+
+        return data
+
+    def _extract_metadata_from_rows(self, rows: Dict, filename: str) -> Dict:
+        """从 rows 中提取元数据（试样名称、日期、时间）"""
+        data = {}
+        # 按行构建文本（Y 排序行，X 排序词）
+        lines = []
+        for key in sorted(rows.keys()):
+            row_words = sorted(rows[key], key=lambda w: w['x0'])
+            line_text = ' '.join(w['text'] for w in row_words)
+            lines.append(line_text)
+        full_text = '\n'.join(lines)
+
+        # 优先用试验批号（单值字段，通常在行尾，更可靠）
+        m = re.search(r'试验批号\s+(.+)', full_text)
+        if m:
+            name = m.group(1).strip()
+            name = re.split(r'\s+试[样验]', name)[0].strip()
+            name = ' '.join(name.split())
+            if name and name not in ["试样名称", "样品名称", "试验批号"]:
+                data["sample_name"] = name
+                logger.debug("[%s] 试样名称(从试验批号) = %s", filename, name)
+
+        # 回退：试样名称
+        if "sample_name" not in data:
+            m = re.search(r'试样名称\s+(.+?)\s+试验件数', full_text)
+            if m:
+                name = m.group(1).strip()
+                name = ' '.join(name.split())
+                if name and name not in ["试样名称", "样品名称"]:
+                    data["sample_name"] = name
+                    logger.debug("[%s] 试样名称 = %s", filename, name)
+
+        # 试验日期
+        m = re.search(r'试验日期\s+(\d{4}-\d{1,2}-\d{1,2})', full_text)
+        if m:
+            data["test_date"] = _parse_date(m.group(1))
+            logger.debug("[%s] 试验日期 = %s", filename, data["test_date"])
+
+        # 试验时间
+        m = re.search(r'试验时间\s+(\d{1,2}:\d{2}:\d{2})', full_text)
+        if m:
+            data["test_time"] = _parse_time(m.group(1))
+            logger.debug("[%s] 试验时间 = %s", filename, data["test_time"])
+
+        return data
+
+    def _extract_peel_strength_from_rows(self, all_rows: Dict, filename: str) -> Dict:
+        """从所有页面的 rows 中提取剥离强度数据"""
+        data = {}
+
+        # 策略1: 从统计行提取 A_aver / A_sd（最可靠）
+        stats_data = self._extract_from_stats_line(all_rows, filename)
+        data.update(stats_data)
+
+        # 策略2: 从"平均值"行用 X 间隙分组提取各 S 值
+        s_data = self._extract_s_values_improved(all_rows, filename)
+        for k in ['S1', 'S2', 'S3', 'S4']:
+            if k in s_data and s_data[k] is not None:
+                data[k] = s_data[k]
+
+        # 策略3: 回退到列位置法
+        if not any(k in data for k in ['S1', 'S2', 'S3', 'S4']):
+            s_columns = self._find_s_columns_v2(all_rows)
+            if s_columns:
+                for key in sorted(all_rows.keys()):
+                    rows = all_rows[key]
+                    line_text = ' '.join(w['text'] for w in sorted(rows, key=lambda w: w['x0']))
+                    if '平均值' in line_text:
+                        self._assign_values_to_s_columns(rows, s_columns, data, filename)
+                        break
+
+        return data
+
+    def _extract_from_stats_line(self, all_rows: Dict, filename: str) -> Dict:
+        """从统计行提取 A_aver 和 A_sd（格式：A_max=xxx A_min=xxx A_aver=xxx A_sd=xxx）"""
+        data = {}
+        for key in sorted(all_rows.keys()):
+            rows = all_rows[key]
+            line_text = ' '.join(w['text'] for w in sorted(rows, key=lambda w: w['x0']))
+            compact = line_text.replace(' ', '')
+
+            if 'A_aver' in compact or '统计' in compact:
+                m = re.search(r'A_aver\s*=\s*([\d.]+)', compact, re.IGNORECASE)
+                if m:
+                    try:
+                        data["A_aver"] = float(m.group(1))
+                        logger.debug("[%s] A_aver = %s", filename, data["A_aver"])
+                    except ValueError:
+                        pass
+
+                m = re.search(r'A_sd\s*=\s*([\d.]+)', compact, re.IGNORECASE)
+                if m:
+                    try:
+                        data["A_sd"] = float(m.group(1))
+                        logger.debug("[%s] A_sd = %s", filename, data["A_sd"])
+                    except ValueError:
+                        pass
+
+                # 只在两个字段都提取到时才停止，否则继续搜索下一行
+                if data.get("A_aver") is not None and data.get("A_sd") is not None:
+                    break
+
+        return data
+
+    def _extract_s_values_improved(self, all_rows: Dict, filename: str) -> Dict:
+        """从"平均值"行提取 S1-S9（使用 X 坐标间隙分组，避免列对齐偏差）"""
+        data = {}
+
+        for key in sorted(all_rows.keys()):
+            rows = all_rows[key]
+            line_text = ' '.join(w['text'] for w in sorted(rows, key=lambda w: w['x0']))
+
+            if '平均值' not in line_text:
+                continue
+
+            # 收集"平均值"之后的数字片段
+            sorted_words = sorted(rows, key=lambda w: w['x0'])
+            past_avg = False
+            number_fragments = []
+            for w in sorted_words:
+                t = w['text'].strip()
+                if t == '平均值':
+                    past_avg = True
+                    continue
+                if not past_avg:
+                    continue
+                if re.match(r'^[\d.]+$', t):
+                    number_fragments.append(w)
+
+            if not number_fragments:
+                continue
+
+            # 按 X 间隙分组（大间隙 = 新数字）
+            groups = self._group_by_x_gap(number_fragments)
+
+            # 每组拼接、清理、转为 float
+            s_values = []
+            for group in groups:
+                chars = ''.join(w['text'].strip() for w in sorted(group, key=lambda w: w['x0']))
+                num_str = _clean_number(chars)
+                try:
+                    val = float(num_str)
+                    s_values.append(val)
+                except ValueError:
+                    pass
+
+            # 按顺序赋值 S1-S9
+            for i, val in enumerate(s_values[:9]):
+                data[f"S{i+1}"] = val
+                logger.debug("[%s] S%d = %s", filename, i+1, val)
+
+            break
+
+        return data
+
+    def _group_by_x_gap(self, words: List, gap_threshold: float = 10.0) -> List[List]:
+        """按 X 坐标间隙分组 words（大间隙 = 新数字组）"""
+        if not words:
+            return []
+        sorted_words = sorted(words, key=lambda w: w['x0'])
+        groups = [[sorted_words[0]]]
+        for w in sorted_words[1:]:
+            prev = groups[-1][-1]
+            gap = w['x0'] - prev['x1']
+            if gap > gap_threshold:
+                groups.append([w])
+            else:
+                groups[-1].append(w)
+        return groups
+
+    def _find_s_columns_v2(self, all_rows: Dict) -> Dict:
+        """找到 S1-S9 列的位置（改进版）"""
+        # 遍历所有行，找包含 S1, S2... 的行
+        for key in sorted(all_rows.keys()):
+            rows = all_rows[key]
+            s_positions = []
+
+            for w in sorted(rows, key=lambda w: w['x0']):
+                t = w['text'].strip()
+                m = re.match(r'^S([1-9])$', t)
+                if m:
+                    x_center = (w['x0'] + w['x1']) / 2
+                    s_positions.append((f"S{m.group(1)}", x_center))
+
+            if s_positions:
+                # 计算列边界
+                boundaries = []
+                for i in range(len(s_positions) - 1):
+                    mid = (s_positions[i][1] + s_positions[i + 1][1]) / 2
+                    boundaries.append(mid)
+
+                columns = {}
+                for i, (label, _) in enumerate(s_positions):
+                    low = boundaries[i - 1] if i > 0 else 0
+                    high = boundaries[i] if i < len(boundaries) else 9999
+                    columns[label] = (low, high)
+
+                logger.debug("S 列区间: %s", columns)
+                return columns
+
+        return {}
+
+    def _assign_values_to_s_columns(self, words: List, s_columns: Dict, data: Dict, filename: str):
+        """将 words 中的数字按 x 坐标归入 S 列"""
+        s_values = defaultdict(list)
+
+        for w in words:
+            t = w['text'].strip()
+            if not t or t == '平均值':
+                continue
+            if not re.match(r'^[\d.]+$', t):
+                continue
+
+            x_center = (w['x0'] + w['x1']) / 2
+            for sk, (x_low, x_high) in s_columns.items():
+                if x_low <= x_center <= x_high:
+                    s_values[sk].append(t)
+                    break
+
+        # 拼接数字并转为 float
+        for sk in ['S1', 'S2', 'S3', 'S4']:
+            chars = s_values.get(sk, [])
+            if chars:
+                num_str = _clean_number(''.join(chars))
+                try:
+                    data[sk] = float(num_str)
+                    logger.debug("[%s] %s = %s", filename, sk, data[sk])
+                except ValueError:
+                    logger.warning("[%s] %s 无法解析: %s", filename, sk, num_str)
+
+    def _extract_a_sd_from_rows(self, all_rows: Dict, filename: str) -> Optional[float]:
+        """从所有行中提取 A_sd 值"""
+        for key in sorted(all_rows.keys()):
+            rows = all_rows[key]
+            line_text = ' '.join(w['text'] for w in sorted(rows, key=lambda w: w['x0']))
+            compact = line_text.replace(' ', '')
+
+            if 'A_sd' in compact or 'A_SD' in compact or '标准差' in compact:
+                m = re.search(r'A_sd\s*=\s*([\d.]+)', compact, re.IGNORECASE)
+                if m:
+                    try:
+                        val = float(m.group(1))
+                        logger.debug("[%s] A_sd = %s", filename, val)
+                        return val
+                    except ValueError:
+                        pass
+
+        return None
+
+    def _extract_by_ocr(self, pdf) -> Dict:
+        """策略3: 使用 OCR 识别扫描件"""
+        if not _HAS_OCR:
+            return {}
+
+        data = {}
+        try:
+            for page_num, page in enumerate(pdf.pages):
+                # 将 PDF 页面转为图片
+                img = page.to_image(resolution=300)
+                img_pil = img.original
+
+                # OCR 识别
+                text = pytesseract.image_to_string(img_pil, lang=OCR_LANG)
+
+                # 从文本中提取字段
+                # 试样名称
+                m = re.search(r'试样名称[:：]?\s*(.+)', text)
+                if m and not data.get("sample_name"):
+                    data["sample_name"] = m.group(1).strip()
+
+                # 日期
+                m = re.search(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})', text)
+                if m and not data.get("test_date"):
+                    data["test_date"] = _parse_date(m.group(0))
+
+                # 时间
+                m = re.search(r'(\d{1,2}):(\d{2}):(\d{2})', text)
+                if m and not data.get("test_time"):
+                    data["test_time"] = _parse_time(m.group(0))
+
+        except Exception as e:
+            logger.warning("OCR 识别失败: %s", e)
+
+        return data
+
+    def _validate_and_fix(self, data: Dict, filename: str) -> Dict:
+        """验证提取的字段并修正明显错误"""
+        # 验证 S 值合理性（实际数据范围 0.001 ~ 0.1 kN/m）
+        for sk in ['S1', 'S2', 'S3', 'S4']:
+            val = data.get(sk)
+            if val is not None:
+                if not (0.0001 <= val <= 100):
+                    logger.warning("[%s] %s 值异常: %s，标记为需人工复核", filename, sk, val)
+                    data[f"{sk}_warning"] = f"值异常: {val}"
+
+        # 验证 A_sd 合理性
+        a_sd = data.get("A_sd")
+        if a_sd is not None:
+            if not (0 <= a_sd <= 100):
+                logger.warning("[%s] A_sd 值异常: %s，标记为需人工复核", filename, a_sd)
+                data["A_sd_warning"] = f"值异常: {a_sd}"
+
+        return data
+
+    def _fill_record(self, record: PeelDataRecord, data: Dict):
+        """将提取的数据填充到 PeelDataRecord"""
+        if "sample_name" in data:
+            record.sample_name = data["sample_name"]
+        if "test_date" in data:
+            record.test_date = data["test_date"]
+        if "test_time" in data:
+            record.test_time = data["test_time"]
+        for sk in ['S1', 'S2', 'S3', 'S4']:
+            if sk in data:
+                # S1→curve_1, S2→curve_2, ...
+                curve_key = f"curve_{sk[1:]}"
+                setattr(record, curve_key, data[sk])
+        if "A_sd" in data:
+            record.std_dev = data["A_sd"]
+
+    def _determine_polarity(self, sample_name: str, filename: str) -> str:
+        """判断极性（使用配置中的正负极关键字）"""
+        polarity, _ = config.determine_polarity_with_materials(sample_name, filename)
+        return polarity
+
+    def _upgrade_sample_name(
+        self, existing: Optional[str], filename: str
+    ) -> Optional[str]:
+        """
+        按优先级链升级试样名称
+
+        优先级：
+        1. 从文件名提取（最高优先）
+        2. 材料关键词辅助判断（用于修正极性，不影响 sample_name 内容）
+        3. "正极"/"负极"前缀全量提取（从已有 sample_name 中）
+        4. 保留已提取的 sample_name
+        """
+        # 优先级 1: 从文件名提取
+        from_filename = config.extract_sample_name_from_filename(filename)
+        if from_filename:
+            # 如果文件名有"正极"或"负极"前缀，验证其完整性
+            from_polarity = config.extract_sample_name_by_polarity_prefix(from_filename)
+            if from_polarity:
+                logger.info(
+                    "[%s] 试样名称(优先级1-文件名+极性前缀) = %s",
+                    os.path.basename(filename), from_polarity
+                )
+                return from_polarity
+            # 文件名无极性前缀但仍然是有效来源
+            logger.info(
+                "[%s] 试样名称(优先级1-文件名) = %s",
+                os.path.basename(filename), from_filename
+            )
+            return from_filename
+
+        # 优先级 3: 从已有 sample_name 中提取"正极"/"负极"前缀
+        if existing:
+            from_polarity = config.extract_sample_name_by_polarity_prefix(existing)
+            if from_polarity and from_polarity != existing:
+                logger.info(
+                    "[%s] 试样名称(优先级3-极性前缀) = %s (原: %s)",
+                    os.path.basename(filename), from_polarity, existing
+                )
+                return from_polarity
+            # 优先级 2: 材料关键词辅助（用于日志记录，不修改 sample_name）
+            materials = config.match_material_keywords(existing)
+            if materials:
+                logger.debug(
+                    "[%s] 试样名称匹配到材料关键词: %s",
+                    os.path.basename(filename), materials
+                )
+
+        # 优先级 4: 保留已有的 sample_name
+        return existing

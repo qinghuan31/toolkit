@@ -8,6 +8,11 @@ from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QIcon
 from core.base_plugin import BasePlugin
 from plugins.peel_data.ui.main_widget import PeelDataWidget
+from plugins.peel_data.models import ensure_table, ensure_history_table
+from core.logger import get_logger
+
+
+logger = get_logger("peel_data.plugin")
 
 
 class PeelDataPlugin(BasePlugin):
@@ -30,9 +35,15 @@ class PeelDataPlugin(BasePlugin):
 
     @property
     def version(self) -> str:
-        return "1.3.0"
+        return "1.5.0"
 
     def create_widget(self, parent: Optional[QWidget] = None) -> QWidget:
+        # 确保数据库表结构最新（含迁移新列）
+        try:
+            ensure_table()
+            ensure_history_table()
+        except Exception as e:
+            logger.warning(f"确保数据库表结构时出错（可忽略）: {e}")
         return PeelDataWidget(parent)
 
     def on_activated(self):

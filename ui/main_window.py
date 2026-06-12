@@ -55,7 +55,7 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self):
         """初始化 UI 布局"""
-        self.setWindowTitle("Toolkit v1.3")
+        self.setWindowTitle("Toolkit v1.5.0")
         self.setMinimumSize(1100, 700)
         self.resize(1280, 800)
 
@@ -105,7 +105,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addStretch()
 
         # 底部版本信息
-        version_label = QLabel("v1.3.0")
+        version_label = QLabel("v1.4.0")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version_label.setStyleSheet("color: #7f8c8d; font-size: 11px; padding: 10px;")
         sidebar_layout.addWidget(version_label)
