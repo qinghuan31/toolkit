@@ -35,7 +35,9 @@ class PeelDataPlugin(BasePlugin):
 
     @property
     def version(self) -> str:
-        return "1.5.0"
+        # 【v1.5.1】版本号从 config 读取,实现单一来源
+        from config import get_version
+        return get_version()
 
     def create_widget(self, parent: Optional[QWidget] = None) -> QWidget:
         # 确保数据库表结构最新（含迁移新列）

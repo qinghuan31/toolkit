@@ -57,6 +57,12 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# 【v1.5.1】从 config 读取版本号(单一来源)
+import sys as _sys
+_sys.path.insert(0, PROJECT_ROOT)
+import config as _cfg
+APP_VERSION = _cfg.get_version()
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -64,7 +70,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Toolkit_v1.5.0',
+    name=f'Toolkit_v{APP_VERSION}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

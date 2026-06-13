@@ -26,8 +26,16 @@ class DatabaseConfig:
 class AppConfig:
     """应用全局配置"""
     app_name: str = "Toolkit"
-    app_version: str = "1.0.0"
+    # 【v1.5.1 单一来源】全项目版本号统一从此处读取
+    # 不再在 plugin.py / main_window.py / toolkit.spec / release.yml 硬编码
+    app_version: str = "1.5.1"
     organization: str = "WorkBuddy"
+
+    # GitHub 仓库信息 —— 用于自动更新检查
+    github_owner: str = "qinghuan31"
+    github_repo: str = "toolkit"
+    # 代理前缀 —— 国内加速 GitHub 下载(可改可禁)
+    github_proxy: str = "https://gh-proxy.org/"
 
     # 数据目录（动态持久化：首次为空，用户选择后自动保存，下次启动自动回填）
     last_data_dir: str = ""
@@ -285,6 +293,40 @@ class AppConfig:
                 return "负极", materials
 
         return "未知", materials
+
+
+# === 版本号工具函数 ===
+
+def get_version() -> str:
+    """获取当前应用版本(单一来源)"""
+    return config.app_version
+
+
+def bump_version(level: str = "patch") -> str:
+    """
+    升版号
+    - 'major' / 'minor' / 'patch' 三选一
+    - 返回新版本号(同时已写回 config.app_version)
+    """
+    import re
+    v = config.app_version
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", v)
+    if not m:
+        raise ValueError(f"版本号格式不规范: {v}")
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if level == "major":
+        major += 1
+        minor, patch = 0, 0
+    elif level == "minor":
+        minor += 1
+        patch = 0
+    elif level == "patch":
+        patch += 1
+    else:
+        raise ValueError(f"未知升版级别: {level}")
+    new_v = f"{major}.{minor}.{patch}"
+    config.app_version = new_v
+    return new_v
 
 
 # 全局单例

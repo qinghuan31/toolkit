@@ -727,53 +727,84 @@ class VersionPageWidget(QWidget):
         self._refresh_timeline()
 
     def _on_check_update(self):
-        """检查更新"""
+        """检查更新 —— 调用 core.updater,UI 仅做展示"""
+        from core.updater import check_for_update
+        from config import get_version
+
+        self._btn_check_update.setEnabled(False)
+        self._btn_check_update.setText("检查中...")
+        QApplication.processEvents()
+
         try:
-            import json
-            import urllib.request
-
-            # 读取当前版本号
-            current = self._current_version
-
-            # TODO: 替换为实际的更新检查地址
-            update_url = "https://api.example.com/toolkit/version.json"
-
-            self._btn_check_update.setEnabled(False)
-            self._btn_check_update.setText("检查中...")
-
-            try:
-                req = urllib.request.Request(
-                    update_url,
-                    headers={"User-Agent": "Toolkit-VersionCheck/1.0"},
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    latest_version = data.get("version", "")
-                    download_url = data.get("download_url", "")
-                    changelog = data.get("changelog", "")
-
-                    if latest_version and latest_version != current:
-                        msg = (
-                            f"发现新版本：v{latest_version}\n\n"
-                            f"当前版本：v{current}\n\n"
-                            f"更新内容：\n{changelog}\n\n"
-                            f"请访问下载页面获取最新版本。"
-                        )
-                        reply = QMessageBox.information(
-                            self, "发现新版本", msg,
-                            QMessageBox.StandardButton.Ok,
-                        )
-                    else:
-                        QMessageBox.information(
-                            self, "已是最新版本",
-                            f"当前版本 v{current} 已是最新版本"
-                        )
-            except Exception as e:
-                QMessageBox.warning(
-                    self, "检查失败",
-                    f"无法连接更新服务器：\n{e}\n\n"
-                    f"请检查网络连接或稍后重试。"
-                )
+            info = check_for_update()
+        except Exception as e:
+            QMessageBox.warning(
+                self, "检查失败",
+                f"检查更新时发生异常:\n{e}\n\n请稍后重试。"
+            )
+            return
         finally:
             self._btn_check_update.setEnabled(True)
             self._btn_check_update.setText("检查更新")
+
+        if info.error:
+            QMessageBox.warning(
+                self, "检查失败",
+                f"无法连接更新服务器:\n{info.error}\n\n"
+                f"请检查网络连接或稍后重试。"
+            )
+            return
+
+        if not info.has_update:
+            QMessageBox.information(
+                self, "已是最新版本",
+                f"当前版本 v{info.current_version} 已是最新版本"
+            )
+            return
+
+        # 找到新版本 —— 弹窗显示
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox, QLabel
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("发现新版本")
+        dlg.resize(620, 480)
+        layout = QVBoxLayout(dlg)
+
+        title = QLabel(
+            f"<h3>🎉 发现新版本 v{info.latest_version}</h3>"
+            f"<p>当前版本: v{info.current_version}</p>"
+        )
+        layout.addWidget(title)
+
+        notes_label = QLabel("<b>更新内容:</b>")
+        layout.addWidget(notes_label)
+
+        notes = QTextEdit()
+        notes.setReadOnly(True)
+        notes.setPlainText(info.release_notes or "(release 暂无说明)")
+        layout.addWidget(notes)
+
+        url_label = QLabel(
+            f"<b>加速下载链接:</b><br>"
+            f"<a href='{info.accelerated_url}'>{info.accelerated_url}</a><br><br>"
+            f"<b>原始 GitHub 链接:</b><br>"
+            f"<a href='{info.download_url}'>{info.download_url}</a>"
+        )
+        url_label.setOpenExternalLinks(True)
+        url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(url_label)
+
+        btns = QDialogButtonBox()
+        btn_dl = btns.addButton("打开加速下载", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_browser = btns.addButton("打开 GitHub Release", QDialogButtonBox.ButtonRole.ActionRole)
+        btns.addButton(QDialogButtonBox.StandardButton.Close)
+        btn_dl.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(info.accelerated_url)))
+        btn_browser.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(info.release_url)))
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        layout.addWidget(btns)
+
+        dlg.exec()

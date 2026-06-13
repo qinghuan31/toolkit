@@ -6,6 +6,26 @@
 
 ---
 
+## [1.5.1] - 2026-06-14
+
+### 新增功能
+- **自动更新检查**：点击"版本动态"页面的"检查更新"按钮，自动从 GitHub Releases 拉取最新版本号和下载链接
+- **gh-proxy 代理加速**：所有 GitHub 资源下载链接自动拼接 `https://gh-proxy.org/` 前缀，国内用户下载更快
+- **版本号单一来源**：`config.AppConfig.app_version` 作为全项目唯一版本号来源。`plugin.py` / `main_window.py` / `toolkit.spec` / `VERSION_LOG.md` 全部从 `config.get_version()` 读取，杜绝版本号漂移
+- **bump_version() 工具**：`config.bump_version("major"|"minor"|"patch")` 升版号后自动写回 `config.app_version`
+
+### 功能改进
+- **检查更新弹窗**：从简陋的 `QMessageBox` 改为 `QDialog`，含更新内容预览 + 加速下载 + 原始 GitHub 链接三按钮
+- **错误提示细分**：网络错误、解析失败、已是最新、发现新版本 4 种情况分别提示，UI 不再吞错
+- **PE 嵌入打包诊断**：使用 PyInstaller `CArchiveReader` 直接读 .exe 内的 TOC，验证 plugins/ 是否真打进去
+
+### 问题修复
+- **PyInstaller 动态插件打包**：`hiddenimports` 解决不了 `_MEIPASS/plugins/` 目录缺失，必须 `datas += [(plugins, plugins)]`
+- **GitHub Actions 跨平台兼容**：`ls -lh` 在 PowerShell 7 不识别，改用 `Get-ChildItem`
+- **workflow_dispatch release 缺 tag**：dispatch 触发时自动建 `ci-build-<short-sha>` 临时 tag
+
+---
+
 ## [1.5.0] - 2026-06-13
 
 ### 新增功能
