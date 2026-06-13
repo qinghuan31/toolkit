@@ -8,18 +8,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.5.0)'
-        required: true
+        description: 'Release tag (e.g. v1.5.0) - 仅用于日志展示,workflow_dispatch 不会自动创建 release 关联'
+        required: false
+        default: 'manual'
 
 jobs:
   build:
     runs-on: windows-latest
     defaults:
       run:
-        shell: pwsh   # PowerShell 7 跨平台稳定
+        shell: pwsh
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 需要 git tag 信息
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -54,9 +57,41 @@ jobs:
           }
           Write-Host "Build verified: $($exe.Name) ($([math]::Round($exe.Length / 1MB, 1)) MB)"
 
+      - name: Detect tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # tag 触发:用 push 的 ref
+            echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "MODE=tag" >> $GITHUB_OUTPUT
+          else
+            # workflow_dispatch:用输入或当前 commit
+            INPUT_TAG="${{ inputs.tag }}"
+            if [ -z "$INPUT_TAG" ] || [ "$INPUT_TAG" = "manual" ]; then
+              echo "TAG=" >> $GITHUB_OUTPUT
+              echo "MODE=artifact" >> $GITHUB_OUTPUT
+            else
+              echo "TAG=$INPUT_TAG" >> $GITHUB_OUTPUT
+              echo "MODE=tag" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Upload artifacts (no release)
+        if: steps.tag.outputs.MODE == 'artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Toolkit-Windows
+          path: |
+            dist/Toolkit_v*.exe
+            dist/README.txt
+          if-no-files-found: error
+
       - name: Upload to release
+        if: steps.tag.outputs.MODE == 'tag'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.TAG }}
           files: |
             dist/Toolkit_v*.exe
             dist/README.txt
