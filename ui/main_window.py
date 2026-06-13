@@ -38,6 +38,7 @@ class MainWindow(QMainWindow):
 
     # 特殊页面标识（非插件）
     PAGE_VERSION = "__version__"
+    PAGE_SETTINGS = "__settings__"
 
     def __init__(self):
         super().__init__()
@@ -200,6 +201,12 @@ class MainWindow(QMainWindow):
         self._nav_buttons[self.PAGE_VERSION] = btn_version
         self._builtin_nav_container.addWidget(btn_version)
 
+        # 综合设置（弹出对话框，非嵌入页面）
+        btn_settings = SidebarButton(self.PAGE_SETTINGS, "  ⚙ 综合设置")
+        btn_settings.setCheckable(False)
+        btn_settings.clicked.connect(self._open_settings)
+        self._builtin_nav_container.addWidget(btn_settings)
+
     def _switch_plugin(self, name: str):
         """切换到指定插件"""
         # 更新导航按钮状态
@@ -240,6 +247,12 @@ class MainWindow(QMainWindow):
     def _apply_style(self):
         """应用样式"""
         self.setStyleSheet(LIGHT_STYLE)
+
+    def _open_settings(self):
+        """打开综合设置对话框"""
+        from ui.settings_dialog import SettingsDialog
+        dialog = SettingsDialog(self)
+        dialog.exec()
 
     def set_status(self, message: str):
         """设置状态栏消息"""

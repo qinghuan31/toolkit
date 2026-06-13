@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from core.logger import get_logger
 from core.database import DatabaseManager
-from plugins.peel_data.models import PeelDataRecord, ensure_table, ensure_history_table
+from plugins.peel_data.models import PeelDataRecord, ensure_table, ensure_history_table, get_history_table_name
 from plugins.peel_data.pdf_parser import PDFParser
 from plugins.peel_data.excel_parser import ExcelParser
 
@@ -390,15 +390,16 @@ class PeelDataExtractor:
         return list(seen.values()), skipped
 
     def _save_history_to_db(self, history: List[FileHistory], request_id: str):
-        """将提取历史写入 extraction_history 表"""
+        """将提取历史写入 peel_data_extraction_history 表"""
         if not history:
             return
         try:
             ensure_history_table()
+            table_name = get_history_table_name()
             db = DatabaseManager()
             for h in history:
                 db.execute(
-                    'INSERT OR IGNORE INTO "extraction_history" '
+                    f'INSERT OR IGNORE INTO "{table_name}" '
                     '("file_path", "file_name", "success", "reason", "request_id", "operation_time") '
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (h.file_path, h.file_name, 1 if h.success else 0, h.reason, request_id, h.operation_time),

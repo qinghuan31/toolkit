@@ -10,15 +10,46 @@ from typing import Optional, Tuple
 @dataclass
 class DatabaseConfig:
     """数据库配置（SQLite）"""
-    # SQLite 数据库文件路径，空字符串则使用项目根目录下 data/toolkit.db
+    # SQLite 数据库文件路径，空字符串则使用项目根目录下 data/app.db
     database_path: str = ""
+
+    # 【v1.6.0】网络共享模式 —— 局域网多设备访问同一数据库
+    # 模式选项:
+    #   "local"     - 默认,只访问本机 SQLite 文件
+    #   "server"    - 监听 HTTP API,其他设备通过 HTTP 访问
+    #   "client"    - 客户端模式,只访问 server 的 API,不直接动 SQLite
+    network_mode: str = "local"
+
+    # 当 network_mode="server" 时,HTTP 监听地址
+    server_host: str = "0.0.0.0"
+    server_port: int = 8765
+
+    # 当 network_mode="client" 时,server 的访问地址
+    # 例: http://192.168.1.100:8765
+    server_url: str = ""
+
+    # API 鉴权 token(可选,空字符串=无鉴权,内部用时建议设置)
+    api_token: str = ""
+
+    # 【v1.7.0】客户端写入限制
+    # True  = 客户端可读可写（默认，兼容旧行为）
+    # False = 客户端只能查询，insert/update/delete 被服务端拒绝（403）
+    server_allow_write: bool = True
+
+    # 【v1.7.0】局域网设备自动发现 —— 启动时按子网扫描其他 Toolkit 实例
+    # 扫描子网掩码位数 (例: 24 表示扫描 192.168.1.0/24)
+    discovery_cidr_prefix: int = 24
+    # 扫描超时（秒）
+    discovery_timeout: float = 0.5
+    # 发现的设备列表缓存（不持久化,启动时清空）
+    discovered_devices: list = field(default_factory=list)
 
     @property
     def resolved_path(self) -> str:
         if self.database_path:
             return self.database_path
         return os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "data", "toolkit.db"
+            os.path.dirname(os.path.abspath(__file__)), "data", "app.db"
         )
 
 
@@ -28,7 +59,7 @@ class AppConfig:
     app_name: str = "Toolkit"
     # 【v1.5.1 单一来源】全项目版本号统一从此处读取
     # 不再在 plugin.py / main_window.py / toolkit.spec / release.yml 硬编码
-    app_version: str = "1.5.1"
+    app_version: str = "1.7.0"
     organization: str = "WorkBuddy"
 
     # GitHub 仓库信息 —— 用于自动更新检查
@@ -108,26 +139,71 @@ class AppConfig:
         )
 
     def save(self):
-        """将 last_data_dir 持久化到 JSON 配置文件（失败静默忽略）"""
+        """将全部配置持久化到 JSON 文件（失败静默忽略）"""
         try:
             config_dir = os.path.dirname(self._config_file)
             os.makedirs(config_dir, exist_ok=True)
-            data = {"last_data_dir": self.last_data_dir}
+            data = self.export_settings()
             with open(self._config_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass  # 不影响主功能
 
     def load(self):
-        """从 JSON 配置文件读取 last_data_dir（失败则以空字符串兜底）"""
+        """从 JSON 配置文件读取全部设置（失败则以默认值兜底）"""
         try:
             if os.path.isfile(self._config_file):
                 with open(self._config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if isinstance(data, dict) and "last_data_dir" in data:
-                    self.last_data_dir = data["last_data_dir"]
+                if isinstance(data, dict):
+                    self.import_settings(data)
         except Exception:
             self.last_data_dir = ""
+
+    def export_settings(self) -> dict:
+        """导出全部配置为字典（供 save / 导出功能使用）"""
+        return {
+            "last_data_dir": self.last_data_dir,
+            "db": {
+                "database_path": self.db.database_path,
+                "network_mode": self.db.network_mode,
+                "server_host": self.db.server_host,
+                "server_port": self.db.server_port,
+                "server_url": self.db.server_url,
+                "api_token": self.db.api_token,
+                "server_allow_write": self.db.server_allow_write,
+            },
+            "positive_keywords": self.positive_keywords,
+            "negative_keywords": self.negative_keywords,
+            "lithium_battery_materials": self.lithium_battery_materials,
+            "github_proxy": self.github_proxy,
+        }
+
+    def import_settings(self, data: dict):
+        """从字典导入配置（兼容缺失字段，不会因缺少某个 key 而崩溃）"""
+        if not isinstance(data, dict):
+            return
+        self.last_data_dir = data.get("last_data_dir", self.last_data_dir)
+        # 数据库配置
+        db_data = data.get("db", {})
+        if isinstance(db_data, dict):
+            self.db.database_path = db_data.get("database_path", self.db.database_path)
+            self.db.network_mode = db_data.get("network_mode", self.db.network_mode)
+            self.db.server_host = db_data.get("server_host", self.db.server_host)
+            self.db.server_port = db_data.get("server_port", self.db.server_port)
+            self.db.server_url = db_data.get("server_url", self.db.server_url)
+            self.db.api_token = db_data.get("api_token", self.db.api_token)
+            self.db.server_allow_write = db_data.get("server_allow_write", self.db.server_allow_write)
+        # 关键词
+        if "positive_keywords" in data and isinstance(data["positive_keywords"], list):
+            self.positive_keywords = data["positive_keywords"]
+        if "negative_keywords" in data and isinstance(data["negative_keywords"], list):
+            self.negative_keywords = data["negative_keywords"]
+        if "lithium_battery_materials" in data and isinstance(data["lithium_battery_materials"], list):
+            self.lithium_battery_materials = data["lithium_battery_materials"]
+        # GitHub 代理
+        if "github_proxy" in data:
+            self.github_proxy = data["github_proxy"]
 
     # ── 试样名称提取（共享工具，供 excel_parser / pdf_parser 调用） ──
     @staticmethod

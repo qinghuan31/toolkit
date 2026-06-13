@@ -162,14 +162,31 @@ def ensure_table():
             logger.info(f"已添加新列 file_type 到表 {table_name}")
 
 
-def ensure_history_table():
-    """确保提取历史记录表存在；若缺少 operation_time 列则自动添加"""
+def get_history_table_name() -> str:
+    """获取历史记录表名（插件名_数据库名格式）"""
+    return "peel_data_extraction_history"
+
+
+def ensure_history_table() -> str:
+    """确保提取历史记录表存在；若缺少 operation_time 列则自动添加。
+    返回当前使用的表名。
+
+    【v1.7.0 命名规范迁移】
+    旧表名 extraction_history → 新表名 peel_data_extraction_history
+    若检测到旧表存在且新表不存在，自动 RENAME 迁移。
+    """
     db = DatabaseManager()
-    table_name = "extraction_history"
+    old_table_name = "extraction_history"
+    table_name = get_history_table_name()
+
+    # 命名规范迁移：旧表 → 新表
+    if db.table_exists(old_table_name) and not db.table_exists(table_name):
+        db.execute(f'ALTER TABLE "{old_table_name}" RENAME TO "{table_name}"')
+        logger.info(f"表命名规范迁移: {old_table_name} → {table_name}")
 
     if not db.table_exists(table_name):
-        ddl = """
-        CREATE TABLE IF NOT EXISTS "extraction_history" (
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS "{table_name}" (
             "id"             INTEGER PRIMARY KEY AUTOINCREMENT,
             "file_path"      TEXT    NOT NULL,
             "file_name"      TEXT    NOT NULL,

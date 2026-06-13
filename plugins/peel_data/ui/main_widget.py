@@ -621,10 +621,12 @@ class HistoryDialog(QDialog):
         """从数据库中删除指定文件路径的历史记录"""
         try:
             from core.database import DatabaseManager
+            from plugins.peel_data.models import get_history_table_name
+            table_name = get_history_table_name()
             db = DatabaseManager()
             for fp in file_paths:
                 db.execute(
-                    'DELETE FROM "extraction_history" WHERE "file_path"=?',
+                    f'DELETE FROM "{table_name}" WHERE "file_path"=?',
                     (fp,),
                 )
         except Exception as e:
@@ -710,9 +712,11 @@ class HistoryDialog(QDialog):
             # 写入数据库
             try:
                 from core.database import DatabaseManager
+                from plugins.peel_data.models import get_history_table_name
+                table_name = get_history_table_name()
                 db = DatabaseManager()
                 db.execute(
-                    'INSERT INTO "extraction_history" '
+                    f'INSERT INTO "{table_name}" '
                     '("file_path", "file_name", "success", "reason", "operation_time") '
                     'VALUES (?, ?, ?, ?, ?)',
                     (new_fh.file_path, new_fh.file_name, int(new_fh.success), new_fh.reason, new_fh.operation_time),
@@ -2949,12 +2953,13 @@ class PeelDataWidget(QWidget):
         """从数据库加载历史记录，返回 List[FileHistory]"""
         try:
             from core.database import DatabaseManager
-            from plugins.peel_data.models import ensure_history_table
+            from plugins.peel_data.models import ensure_history_table, get_history_table_name
             ensure_history_table()  # 确保表结构最新（含 operation_time 列）
+            table_name = get_history_table_name()
             db = DatabaseManager()
             rows = db.query_all(
                 'SELECT "file_path", "file_name", "success", "reason", "operation_time" '
-                'FROM "extraction_history" '
+                f'FROM "{table_name}" '
                 'ORDER BY "created_at" DESC '
                 'LIMIT 2000'
             )

@@ -182,3 +182,49 @@ class DatabaseManager:
             return
         self.execute(ddl)
         logger.info(f"表 '{table_name}' 创建/确认就绪")
+
+    # === v1.6.0 网络多设备 CRUD(局域网 server/client 模式) ===
+
+    def update(self, table: str, data: Dict[str, Any], where: str, where_params: tuple) -> int:
+        """更新记录。例: update('peel_data', {'sample_name': 'X'}, 'id=?', (1,))"""
+        if not self._db_available:
+            return 0
+        set_clause = ", ".join(f'"{k}"=?' for k in data.keys())
+        sql = f'UPDATE "{table}" SET {set_clause} WHERE {where}'
+        params = tuple(data.values()) + where_params
+        return self.execute(sql, params)
+
+    def delete(self, table: str, where: str, where_params: tuple) -> int:
+        """删除记录。例: delete('peel_data', 'id=?', (1,))"""
+        if not self._db_available:
+            return 0
+        sql = f'DELETE FROM "{table}" WHERE {where}'
+        return self.execute(sql, where_params)
+
+    def insert(self, table: str, data: Dict[str, Any]) -> int:
+        """插入记录,返回新行 rowid"""
+        if not self._db_available:
+            return 0
+        columns = ", ".join(f'"{k}"' for k in data.keys())
+        placeholders = ", ".join(["?"] * len(data))
+        sql = f'INSERT INTO "{table}" ({columns}) VALUES ({placeholders})'
+        values = tuple(
+            v.isoformat() if isinstance(v, (_dt.date, _dt.time)) else v
+            for v in data.values()
+        )
+        with self.get_connection() as conn:
+            cursor = conn.execute(sql, values)
+            conn.commit()
+            return cursor.lastrowid
+
+    def count(self, table: str, where: str = "1=1", where_params: tuple = ()) -> int:
+        """统计行数"""
+        if not self._db_available:
+            return 0
+        result = self.query_one(f'SELECT COUNT(*) AS cnt FROM "{table}" WHERE {where}', where_params)
+        return result["cnt"] if result else 0
+
+    @property
+    def db_path(self) -> str:
+        """供 server/client 模式使用的数据库路径"""
+        return self._db_path

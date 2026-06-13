@@ -6,6 +6,58 @@
 
 ---
 
+## [1.7.0] - 2026-06-14
+
+### 新增功能
+- **综合设置界面**（`ui/settings_dialog.py`）：侧边栏「⚙ 综合设置」按钮打开三 Tab 对话框
+  - 🌐 局域网配置：网络模式切换（local/server/client）、监听地址/端口、API Token（明文+复制+自动生成）、客户端 URL、连接测试、设备扫描+配对
+  - 📋 剥离数据汇总 参数：数据目录路径、数据库路径、关键词按使用范围分 4 类编辑、恢复默认
+  - 💾 导入/导出：JSON 配置文件导出/导入、当前配置预览
+- **配置全量持久化**：`config.save()` / `load()` 从只保存 last_data_dir 扩展为保存全部设置（网络、关键词、代理等）
+- **数据库命名规范**：所有表名统一为"插件名_数据库名"格式
+  - `extraction_history` → `peel_data_extraction_history`
+  - 启动时自动检测旧表并 `ALTER TABLE RENAME`，零数据丢失
+- **客户端写入限制**：服务端可关闭客户端写入权限（`server_allow_write=False`）
+  - 设置界面服务端配置区新增「允许客户端写入」勾选框
+  - 客户端 insert/update/delete 被服务端返回 403 + 友好提示
+  - `/api/health` 响应包含 `allow_write` 字段，客户端可提前获知
+  - 适用场景：多人协作时由主机控制写入，保护数据安全
+
+### 功能改进
+- **实时保存**：设置界面所有参数修改即时生效并持久化，无需点击"保存"按钮
+- **连接测试**：后台线程测试 DB server 健康状态，不阻塞 UI
+- **配置导入兼容**：导入时兼容缺失字段，不会因缺少某个 key 而崩溃
+- **监听地址自动检测**：自动填本机局域网 IP，加「自动检测」按钮
+- **Token 明文显示**：默认 Normal 模式（非密码遮挡），加「📋 复制」按钮
+- **设备自动发现**：`core/discovery.py` 并发扫描局域网 Toolkit 实例，一键配对
+- **版本号升至 1.7.0**
+
+### 问题修复
+- 修复 `main.py:55` 新增 server 启动逻辑使用 `config` 而非 `_config` 别名导致的 NameError（上一版本遗留）
+- 修复 SettingsDialog 打开即崩的严重 bug（_NetworkTab 布局结构损坏 + 缺 QCheckBox 导入）
+
+---
+
+## [1.6.0] - 2026-06-14
+
+### 新增功能
+- **局域网多设备访问数据库**：在主电脑上启动 HTTP server（端口 8765），其他电脑通过 client 模式连过来
+- **DB 同步服务端** (`core/db_server.py`)：标准库 `http.server` + `sqlite3` 零依赖，支持 Bearer Token 鉴权、表白名单、WHERE 子句防注入
+- **DB 同步客户端** (`core/db_client.py`)：标准库 `urllib` 零依赖，REST 风格 API
+- **完整 CRUD 接口**：local SQLite 增 `insert()` / 删 `delete()` / 改 `update()` / 查 `count()` + 已有 query_one/query_all
+- **network_mode 三模式**：local（单机）/ server（开服）/ client（连他机）
+- **使用文档** `NETWORK_USAGE.md`：含防火墙、API curl 示例、v1.7.0 升级计划
+
+### 功能改进
+- **零外部依赖**：服务端和客户端都用 Python 标准库，PyInstaller 打包体积不变
+- **表白名单**：只允许 peel_data_summary / peel_data_extraction_history 两张表被 HTTP 访问，防 SQL 注入
+- **CORS 头**：浏览器侧直接调 API 不需额外代理
+
+### 问题修复
+- 复用 v1.5.1 的版本号单一来源机制，1.6.0 升版自动同步到 plugin/main_window/spec
+
+---
+
 ## [1.5.1] - 2026-06-14
 
 ### 新增功能
