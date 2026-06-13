@@ -84,7 +84,29 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: "Toolkit ${{ steps.tag.outputs.tag }}"
-          generate_release_notes: true
+          # 自定义 body 而不是用 generate_release_notes=true
+          # 因为自动生成的"Full Changelog"是 tag→tag 差异对比链接
+          # 我们要的是直接到 commit 列表的链接(箭头指的位置)
+          body: |
+            ## Toolkit v${{ steps.tag.outputs.tag }} 自动构建
+
+            **完整更新日志**: https://github.com/${{ github.repository }}/commits/${{ steps.tag.outputs.tag }}
+
+            ---
+
+            ### 产物
+            - `Toolkit_v1.5.0.exe` (单文件可执行,无需 Python 环境)
+
+            ### 触发信息
+            - Commit: `${{ github.sha }}`
+            - Branch: `${{ github.ref_name }}`
+            - 触发: `${{ github.event_name }}`
+            - 时间: ${{ github.event.head_commit.timestamp }}
+
+            ### 验证
+            - [ ] 下载 .exe
+            - [ ] 双击启动
+            - [ ] 侧边栏应显示 `peel_data` 标签
           draft: false
           prerelease: false
           files: |
