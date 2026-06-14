@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QStackedWidget, QStatusBar,
     QFrame, QSizePolicy,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QRect
 from PySide6.QtGui import QIcon, QFont
 
 from core.plugin_manager import PluginManager
@@ -63,11 +63,12 @@ class MainWindow(QMainWindow):
         from config import get_version
         self.setWindowTitle(f"Toolkit v{get_version()}")
         self.setMinimumSize(1100, 700)
-        # 【v1.7.3】按当前屏幕尺寸自适应默认窗口大小
+        # 【v1.7.3】优先恢复上次窗口位置/大小；无可用记录时按屏幕尺寸自适应默认窗口。
         # - 27" 2K 屏（2560×1440）默认约 1920×1080（75% 宽 × 80% 高）
         # - 笔记本 1080P 屏（1920×1080）默认约 1440×860
         # - 小屏（1366×768）回退到 1280×720，仍能容下左侧导航
-        self._apply_adaptive_window_size()
+        if not self._restore_window_geometry():
+            self._apply_adaptive_window_size()
 
         # 中央容器
         central_widget = QWidget()
@@ -360,6 +361,78 @@ class MainWindow(QMainWindow):
         """应用样式"""
         self.setStyleSheet(LIGHT_STYLE)
 
+    def _restore_window_geometry(self) -> bool:
+        """恢复上次窗口位置/大小；记录不可用或越界时返回 False。"""
+        try:
+            from config import config
+            geometry = getattr(config, "ui_window_geometry", {}) or {}
+            if not isinstance(geometry, dict):
+                return False
+
+            width = int(geometry.get("width", 0) or 0)
+            height = int(geometry.get("height", 0) or 0)
+            x = int(geometry.get("x", 0) or 0)
+            y = int(geometry.get("y", 0) or 0)
+            maximized = bool(geometry.get("maximized", False))
+
+            min_size = self.minimumSize()
+            if width < min_size.width() or height < min_size.height():
+                return False
+
+            rect = QRect(x, y, width, height)
+            safe_rect = self._fit_rect_to_available_screens(rect)
+            if safe_rect is None:
+                return False
+
+            self.resize(safe_rect.size())
+            self.move(safe_rect.topLeft())
+            if maximized:
+                self.showMaximized()
+            return True
+        except Exception as exc:
+            logger.warning(f"恢复窗口位置/大小失败，使用自适应默认值: {exc}")
+            return False
+
+    def _fit_rect_to_available_screens(self, rect: QRect) -> QRect | None:
+        """把窗口矩形限制到可用屏幕内，避免拔掉外接屏后窗口跑到屏幕外。"""
+        from PySide6.QtGui import QGuiApplication
+
+        screens = QGuiApplication.screens()
+        if not screens:
+            return None
+
+        # 只要窗口中心仍在某个屏幕可用区域内，就直接恢复。
+        for screen in screens:
+            available = screen.availableGeometry()
+            if available.contains(rect.center()):
+                return rect
+
+        # 中心点不在任何屏幕里：把窗口放到主屏中间，并限制尺寸不超过主屏可用区域。
+        screen = QGuiApplication.primaryScreen() or screens[0]
+        available = screen.availableGeometry()
+        width = min(max(rect.width(), self.minimumWidth()), available.width())
+        height = min(max(rect.height(), self.minimumHeight()), available.height())
+        safe_rect = QRect(0, 0, width, height)
+        safe_rect.moveCenter(available.center())
+        return safe_rect
+
+    def _save_window_geometry(self):
+        """持久化当前窗口位置/大小到 data/app_config.json。"""
+        try:
+            from config import config
+            # 最大化时 normalGeometry 保存的是还原前的正常窗口尺寸，比当前屏幕尺寸更适合下次恢复。
+            rect = self.normalGeometry() if self.isMaximized() else self.geometry()
+            config.ui_window_geometry = {
+                "x": int(rect.x()),
+                "y": int(rect.y()),
+                "width": int(rect.width()),
+                "height": int(rect.height()),
+                "maximized": bool(self.isMaximized()),
+            }
+            config.save()
+        except Exception as exc:
+            logger.warning(f"保存窗口位置/大小失败: {exc}")
+
     def _apply_adaptive_window_size(self):
         """根据当前屏幕尺寸自适应窗口大小并居中
 
@@ -417,10 +490,8 @@ class MainWindow(QMainWindow):
         self.move(frame.topLeft())
 
     def closeEvent(self, event):
-        """关闭窗口前记录当前尺寸，便于下次启动恢复（仅内存态，不强行持久化）"""
-        # v1.7.3 当前只更新一个实例属性，避免在用户没明确要求时写入 config
-        size = self.size()
-        self._last_size_hint = (size.width(), size.height())
+        """关闭窗口前保存当前窗口位置/大小，便于下次启动恢复。"""
+        self._save_window_geometry()
         super().closeEvent(event)
 
     def _open_settings(self):

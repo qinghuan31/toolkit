@@ -74,6 +74,9 @@ class AppConfig:
     # 数据目录（动态持久化：首次为空，用户选择后自动保存，下次启动自动回填）
     last_data_dir: str = ""
 
+    # UI 状态（窗口位置/大小等，非业务配置）
+    ui_window_geometry: dict = field(default_factory=dict)
+
     # 数据库配置
     db: DatabaseConfig = field(default_factory=DatabaseConfig)
 
@@ -181,6 +184,7 @@ class AppConfig:
             "negative_keywords": self.negative_keywords,
             "lithium_battery_materials": self.lithium_battery_materials,
             "github_proxy": self.github_proxy,
+            "ui_window_geometry": self.ui_window_geometry,
         }
 
     def import_settings(self, data: dict):
@@ -209,6 +213,10 @@ class AppConfig:
         # GitHub 代理
         if "github_proxy" in data:
             self.github_proxy = data["github_proxy"]
+        # UI 状态
+        ui_window_geometry = data.get("ui_window_geometry", {})
+        if isinstance(ui_window_geometry, dict):
+            self.ui_window_geometry = ui_window_geometry
 
     # ── 试样名称提取（共享工具，供 excel_parser / pdf_parser 调用） ──
     @staticmethod
