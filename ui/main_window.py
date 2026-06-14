@@ -63,7 +63,11 @@ class MainWindow(QMainWindow):
         from config import get_version
         self.setWindowTitle(f"Toolkit v{get_version()}")
         self.setMinimumSize(1100, 700)
-        self.resize(1280, 800)
+        # 【v1.7.3】按当前屏幕尺寸自适应默认窗口大小
+        # - 27" 2K 屏（2560×1440）默认约 1920×1080（75% 宽 × 80% 高）
+        # - 笔记本 1080P 屏（1920×1080）默认约 1440×860
+        # - 小屏（1366×768）回退到 1280×720，仍能容下左侧导航
+        self._apply_adaptive_window_size()
 
         # 中央容器
         central_widget = QWidget()
@@ -355,6 +359,69 @@ class MainWindow(QMainWindow):
     def _apply_style(self):
         """应用样式"""
         self.setStyleSheet(LIGHT_STYLE)
+
+    def _apply_adaptive_window_size(self):
+        """根据当前屏幕尺寸自适应窗口大小并居中
+
+        设计目标：
+        - 27" 2K（2560×1440）→ 1920×1080，约 75% 宽 × 80% 高，留出任务栏
+        - 笔记本 1080P（1920×1080）→ 1440×860，约 75% 宽 × 80% 高
+        - 13" 小屏（1366×768）→ 1200×680，回退但仍能容下左侧导航
+        - DPI 缩放 > 150% 时宽高同步缩放，避免大屏显示变小
+        """
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1280, 800)
+            self._center_on_screen()
+            return
+
+        available = screen.availableGeometry()
+        dpr = screen.devicePixelRatio() or 1.0
+
+        # 目标比例：宽 75% × 高 80%（留出任务栏 + 视觉呼吸感）
+        target_w = int(available.width() * 0.75)
+        target_h = int(available.height() * 0.80)
+
+        # 下限保证：避免小屏或外接 4K 缩放下窗口过小
+        min_w, min_h = 1280, 720
+        if target_w < min_w:
+            target_w = min_w
+        if target_h < min_h:
+            target_h = min_h
+
+        # 上限控制：避免在 32" 4K 上撑满 2K 物理空间（看着累）
+        # 这里把上限设在 2200×1280（足够宽阔但不顶天）
+        max_w, max_h = 2200, 1280
+        if target_w > max_w:
+            target_w = max_w
+        if target_h > max_h:
+            target_h = max_h
+
+        # DPI 缩放 1.25x 以上时把高度也按比例微调，文字不显得局促
+        if dpr >= 1.25:
+            target_h = int(target_h * 0.95)
+
+        self.resize(target_w, target_h)
+        self._center_on_screen()
+
+    def _center_on_screen(self):
+        """把窗口居中到当前主屏幕可用区域"""
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
+
+    def closeEvent(self, event):
+        """关闭窗口前记录当前尺寸，便于下次启动恢复（仅内存态，不强行持久化）"""
+        # v1.7.3 当前只更新一个实例属性，避免在用户没明确要求时写入 config
+        size = self.size()
+        self._last_size_hint = (size.width(), size.height())
+        super().closeEvent(event)
 
     def _open_settings(self):
         """综合设置兜底入口（保留弹窗模式，用于调试 / 兼容旧调用）。"""
