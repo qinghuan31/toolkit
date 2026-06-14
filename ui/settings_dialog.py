@@ -127,6 +127,8 @@ class _NetworkTab(QWidget, _DirtyTrackerMixin):
         mode_layout.setContentsMargins(16, 20, 16, 16)
 
         self._mode_combo = QComboBox()
+        self._mode_combo.setMinimumWidth(420)
+        self._mode_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._mode_combo.addItems([
             "local  — 仅本机（默认）",
             "server — 作为服务端，局域网其他设备可连接",
@@ -148,7 +150,10 @@ class _NetworkTab(QWidget, _DirtyTrackerMixin):
         server_layout.setContentsMargins(16, 20, 16, 16)
 
         host_row = QHBoxLayout()
+        host_row.setSpacing(8)
+        host_row.setContentsMargins(0, 0, 0, 0)
         self._host_edit = QLineEdit()
+        self._host_edit.setMinimumWidth(360)
         self._host_edit.setPlaceholderText("本机局域网 IP / 0.0.0.0 监听所有网卡")
         host_row.addWidget(self._host_edit)
         btn_detect_ip = QPushButton("自动检测")
@@ -165,7 +170,10 @@ class _NetworkTab(QWidget, _DirtyTrackerMixin):
         server_layout.addRow("端口：", self._port_spin)
 
         token_row = QHBoxLayout()
+        token_row.setSpacing(8)
+        token_row.setContentsMargins(0, 0, 0, 0)
         self._token_edit = QLineEdit()
+        self._token_edit.setMinimumWidth(360)
         self._token_edit.setPlaceholderText("留空则无鉴权（建议内部使用时设置）")
         self._token_edit.setEchoMode(QLineEdit.EchoMode.Normal)
         token_row.addWidget(self._token_edit)
@@ -229,6 +237,8 @@ class _NetworkTab(QWidget, _DirtyTrackerMixin):
         discovery_layout.setContentsMargins(16, 20, 16, 16)
 
         discovery_btn_row = QHBoxLayout()
+        discovery_btn_row.setSpacing(8)
+        discovery_btn_row.setContentsMargins(0, 0, 0, 0)
         self._btn_discover = QPushButton("扫描局域网设备")
         self._btn_discover.setObjectName("btn_primary")
         self._btn_discover.setMinimumWidth(140)
@@ -249,6 +259,7 @@ class _NetworkTab(QWidget, _DirtyTrackerMixin):
         discovery_layout.addLayout(discovery_btn_row)
 
         self._device_list = QListWidget()
+        self._device_list.setMinimumHeight(64)
         self._device_list.setMaximumHeight(140)
         self._device_list.setObjectName("device_list")
         self._device_list.itemSelectionChanged.connect(self._on_device_selected)

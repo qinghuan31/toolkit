@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QScrollArea,
     QPushButton,
     QTabWidget,
     QVBoxLayout,
@@ -98,16 +99,29 @@ class SettingsPage(QWidget):
         self._tabs.addTab(self._import_export_tab, "💾 导入/导出")
 
         self._tabs.currentChanged.connect(self._refresh_dirty_state)
-        layout.addWidget(self._tabs, stretch=1)
+        self._tabs.setMinimumSize(760, 650)
+        self._network_tab.setMinimumSize(760, 620)
+        self._plugin_tab.setMinimumSize(760, 620)
+        self._import_export_tab.setMinimumSize(760, 560)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("settings_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(self._tabs)
+        layout.addWidget(scroll, stretch=1)
 
         # 底部按钮
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
+        btn_row.setContentsMargins(0, 8, 0, 0)
 
         self._hint_label = QLabel("所有改动仅在「保存」后生效。")
         self._hint_label.setObjectName("hint_label")
-        btn_row.addWidget(self._hint_label)
-        btn_row.addStretch()
+        self._hint_label.setWordWrap(True)
+        btn_row.addWidget(self._hint_label, stretch=1)
 
         self._btn_revert = QPushButton("放弃改动")
         self._btn_revert.setObjectName("btn_secondary")
