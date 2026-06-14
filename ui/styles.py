@@ -491,6 +491,90 @@ QProgressBar::chunk {
     border-radius: 4px;
 }
 
+/* ========== Toolkit 工作台 / 功能块中心 ========== */
+QFrame#workbench_hero {
+    background-color: #eaf1fb;
+    border: 1px solid #cddcf2;
+    border-radius: 12px;
+}
+QLabel#eyebrow_label {
+    color: #245a9a;
+    font-size: 12px;
+    font-weight: 700;
+}
+QLabel#hero_title {
+    color: #172033;
+    font-size: 24px;
+    font-weight: 700;
+}
+QLabel#hero_desc, QLabel#page_desc {
+    color: #5b677a;
+    font-size: 13px;
+}
+QLabel#page_title {
+    color: #172033;
+    font-size: 24px;
+    font-weight: 700;
+}
+QLabel#section_title {
+    color: #172033;
+    font-size: 17px;
+    font-weight: 700;
+}
+QFrame#metric_card, QFrame#module_card {
+    background-color: #ffffff;
+    border: 1px solid #dde3ec;
+    border-radius: 10px;
+}
+QFrame#module_card:hover {
+    border: 1px solid #94b7e6;
+    background-color: #fbfdff;
+}
+QLabel#metric_label, QLabel#module_meta, QLabel#metric_hint {
+    color: #6b7280;
+    font-size: 12px;
+}
+QLabel#metric_value {
+    color: #172033;
+    font-size: 25px;
+    font-weight: 700;
+}
+QLabel#module_icon {
+    background-color: #eaf1fb;
+    color: #245a9a;
+    border: 1px solid #cddcf2;
+    border-radius: 9px;
+    font-size: 18px;
+    font-weight: 700;
+}
+QLabel#module_title {
+    color: #172033;
+    font-size: 16px;
+    font-weight: 700;
+}
+QLabel#module_desc {
+    color: #536174;
+    font-size: 12px;
+}
+QLabel#badge_success {
+    background-color: #e8f5ee;
+    color: #166534;
+    border: 1px solid #b8ddc8;
+    border-radius: 9px;
+    padding: 3px 9px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QLabel#count_badge {
+    background-color: #eaf1fb;
+    color: #245a9a;
+    border: 1px solid #cddcf2;
+    border-radius: 10px;
+    padding: 5px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
 /* ========== 状态栏 ========== */
 QStatusBar {
     background-color: #ffffff;

@@ -37,6 +37,8 @@ class MainWindow(QMainWindow):
     """主窗口"""
 
     # 特殊页面标识（非插件）
+    PAGE_WORKBENCH = "__workbench__"
+    PAGE_MODULES = "__modules__"
     PAGE_VERSION = "__version__"
     PAGE_SETTINGS = "__settings__"
 
@@ -89,6 +91,11 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(separator)
 
         # 导航按钮容器
+        self._primary_nav_container = QVBoxLayout()
+        self._primary_nav_container.setSpacing(0)
+        sidebar_layout.addLayout(self._primary_nav_container)
+
+        # 功能块导航按钮容器
         self._nav_container = QVBoxLayout()
         self._nav_container.setSpacing(0)
         sidebar_layout.addLayout(self._nav_container)
@@ -123,7 +130,7 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(content_area)
         content_layout.setContentsMargins(20, 16, 20, 16)
 
-        # 欢迎页
+        # 欢迎页 / 工作台页
         self._stack = QStackedWidget()
         self._welcome_page = self._create_welcome_page()
         self._stack.addWidget(self._welcome_page)
@@ -198,8 +205,41 @@ class MainWindow(QMainWindow):
         discovered = self._plugin_manager.discover_plugins(plugins_dir)
         logger.info(f"共发现 {len(discovered)} 个插件")
 
+        plugins = [self._plugin_manager.get_plugin(name) for name in discovered]
+        plugins = [plugin for plugin in plugins if plugin]
+
+        # Toolkit 一级页面：工作台 + 功能块中心，插件只作为功能块进入。
+        self._workbench_page = None
+        self._modules_page = None
+        if plugins:
+            from ui.workbench_pages import ModulesPage, WorkbenchPage
+
+            self._workbench_page = WorkbenchPage(
+                plugins,
+                on_open_modules=lambda: self._switch_builtin(self.PAGE_MODULES),
+                on_open_plugin=self._switch_plugin,
+                parent=self,
+            )
+            self._modules_page = ModulesPage(
+                plugins,
+                on_open_plugin=self._switch_plugin,
+                parent=self,
+            )
+            self._stack.addWidget(self._workbench_page)
+            self._stack.addWidget(self._modules_page)
+
+            btn_workbench = SidebarButton(self.PAGE_WORKBENCH, "  工作台")
+            btn_workbench.clicked.connect(lambda: self._switch_builtin(self.PAGE_WORKBENCH))
+            self._nav_buttons[self.PAGE_WORKBENCH] = btn_workbench
+            self._primary_nav_container.addWidget(btn_workbench)
+
+            btn_modules = SidebarButton(self.PAGE_MODULES, "  功能块")
+            btn_modules.clicked.connect(lambda: self._switch_builtin(self.PAGE_MODULES))
+            self._nav_buttons[self.PAGE_MODULES] = btn_modules
+            self._primary_nav_container.addWidget(btn_modules)
+
         # 为每个插件创建导航按钮和内容页
-        for _, name in enumerate(discovered):
+        for name in discovered:
             plugin = self._plugin_manager.get_plugin(name)
 
             # 导航按钮
@@ -213,10 +253,9 @@ class MainWindow(QMainWindow):
             if widget:
                 self._stack.addWidget(widget)
 
-        # 默认选中第一个
-        if discovered:
-            first_name = discovered[0]
-            self._switch_plugin(first_name)
+        # 默认停留在 Toolkit 工作台，而不是直接进入某个功能块
+        if self._workbench_page:
+            self._switch_builtin(self.PAGE_WORKBENCH)
 
     def _add_builtin_pages(self):
         """添加内建页面（版本动态等）到侧边栏"""
@@ -272,7 +311,17 @@ class MainWindow(QMainWindow):
             self._plugin_manager.deactivate_plugin(active)
 
         # 切换内容页
-        if page_id == self.PAGE_VERSION:
+        if page_id == self.PAGE_WORKBENCH and self._workbench_page:
+            idx = self._stack.indexOf(self._workbench_page)
+            if idx >= 0:
+                self._stack.setCurrentIndex(idx)
+            self._status_bar.showMessage("工作台")
+        elif page_id == self.PAGE_MODULES and self._modules_page:
+            idx = self._stack.indexOf(self._modules_page)
+            if idx >= 0:
+                self._stack.setCurrentIndex(idx)
+            self._status_bar.showMessage("功能块中心")
+        elif page_id == self.PAGE_VERSION:
             idx = self._stack.indexOf(self._version_page)
             if idx >= 0:
                 self._stack.setCurrentIndex(idx)
