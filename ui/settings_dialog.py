@@ -437,6 +437,24 @@ class _NetworkTab(QWidget):
             self._test_result.setText(f"✗ {msg}")
             self._test_result.setStyleSheet("color: #dc2626; font-size: 13px; font-weight: bold;")
 
+    def _sync_server_runtime(self):
+        """根据当前网络模式启动或停止本进程内的 DB server。"""
+        try:
+            from core.db_server import start_server_in_thread, stop_server, is_server_running
+            if config.db.network_mode == "server":
+                start_server_in_thread()
+                self._test_result.setText(f"✓ 服务端已启动: {config.db.server_host}:{config.db.server_port}")
+                self._test_result.setStyleSheet("color: #059669; font-size: 13px; font-weight: bold;")
+            else:
+                if is_server_running():
+                    stop_server()
+                    self._test_result.setText("✓ 服务端已停止")
+                    self._test_result.setStyleSheet("color: #059669; font-size: 13px; font-weight: bold;")
+        except Exception as e:
+            logger.error(f"同步 DB server 运行状态失败: {e}", exc_info=True)
+            self._test_result.setText(f"✗ 服务端状态同步失败: {e}")
+            self._test_result.setStyleSheet("color: #dc2626; font-size: 13px; font-weight: bold;")
+
     def _save(self):
         """实时保存网络配置到 config"""
         modes = ["local", "server", "client"]
@@ -451,6 +469,7 @@ class _NetworkTab(QWidget):
         config.db.server_url = self._server_url_edit.text().strip()
         config.db.server_allow_write = self._allow_write_check.isChecked()
         config.save()
+        self._sync_server_runtime()
         logger.debug("网络配置已保存")
 
 

@@ -89,6 +89,9 @@ class DatabaseManager:
 
     def query_one(self, sql: str, params: tuple = None) -> Optional[Dict[str, Any]]:
         """查询单条记录，返回字典或 None"""
+        if config.db.network_mode == "client":
+            rows = self.query_all(sql, params)
+            return rows[0] if rows else None
         if not self._db_available:
             return None
         with self.get_connection() as conn:
@@ -100,6 +103,9 @@ class DatabaseManager:
 
     def query_all(self, sql: str, params: tuple = None) -> List[Dict[str, Any]]:
         """查询所有记录，返回字典列表"""
+        if config.db.network_mode == "client":
+            from core.db_client import DatabaseClient
+            return DatabaseClient().query_sql(sql, list(params or ()))
         if not self._db_available:
             return []
         with self.get_connection() as conn:

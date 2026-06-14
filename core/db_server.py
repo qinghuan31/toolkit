@@ -14,6 +14,7 @@ DB 同步服务端(局域网 HTTP API)
 """
 
 import json
+import re
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,8 +34,11 @@ logger = get_logger("db.server")
 ALLOWED_TABLES = {PeelDataRecord.get_table_name(), get_history_table_name()}
 
 # 严格 WHERE 子句校验:只允许字母数字下划线点号比较运算符 and/or/in
-import re
 _SAFE_WHERE = re.compile(r"^[A-Za-z0-9_.\s<>=!\(\)\?,']+$")
+_SELECT_RE = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
+_FROM_TABLE_RE = re.compile(r'\bFROM\s+["`\[]?([A-Za-z0-9_]+)', re.IGNORECASE)
+_JOIN_TABLE_RE = re.compile(r'\bJOIN\s+["`\[]?([A-Za-z0-9_]+)', re.IGNORECASE)
+_MUTATING_SQL_RE = re.compile(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE|ATTACH|DETACH|PRAGMA)\b", re.IGNORECASE)
 
 
 class _DBHandler(BaseHTTPRequestHandler):
@@ -87,9 +91,16 @@ class _DBHandler(BaseHTTPRequestHandler):
         """WHERE 子句白名单(防 SQL 注入)"""
         return bool(where) and bool(_SAFE_WHERE.match(where))
 
+    def _check_readonly_sql(self, sql: str) -> bool:
+        """只允许访问白名单表的 SELECT 查询。"""
+        if not sql or not _SELECT_RE.match(sql):
+            return False
+        if ";" in sql or _MUTATING_SQL_RE.search(sql):
+            return False
+        tables = set(_FROM_TABLE_RE.findall(sql)) | set(_JOIN_TABLE_RE.findall(sql))
+        return bool(tables) and all(table in ALLOWED_TABLES for table in tables)
+
     def do_GET(self):
-        if not self._check_auth():
-            return
         if self.path == "/api/health":
             self._json(200, {
                 "status": "ok",
@@ -99,21 +110,43 @@ class _DBHandler(BaseHTTPRequestHandler):
                 "allow_write": config.db.server_allow_write,
             })
             return
+        if not self._check_auth():
+            return
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
         if not self._check_auth():
             return
         parsed = urlparse(self.path)
-        table = self._check_table(parsed.path)
-        if not table:
-            return
-        action = parsed.path.strip("/").split("/")[2]
         try:
             body = self._read_json()
         except json.JSONDecodeError as e:
             self._json(400, {"error": f"invalid JSON: {e}"})
             return
+
+        if parsed.path == "/api/query":
+            sql = body.get("sql", "")
+            params = body.get("params", [])
+            if not self._check_readonly_sql(sql):
+                self._json(400, {"error": "only SELECT queries on allowlisted tables are allowed"})
+                return
+            old_mode = config.db.network_mode
+            config.db.network_mode = "local"
+            try:
+                db = DatabaseManager()
+                rows = db.query_all(sql, tuple(params))
+                self._json(200, rows)
+            except Exception as e:
+                logger.error(f"API query_sql 失败: {e}", exc_info=True)
+                self._json(500, {"error": str(e)})
+            finally:
+                config.db.network_mode = old_mode
+            return
+
+        table = self._check_table(parsed.path)
+        if not table:
+            return
+        action = parsed.path.strip("/").split("/")[2]
 
         # 【v1.7.0】客户端写入限制:server_allow_write=False 时拒绝写操作
         WRITE_ACTIONS = {"insert", "update", "delete"}
@@ -124,6 +157,8 @@ class _DBHandler(BaseHTTPRequestHandler):
             })
             return
 
+        old_mode = config.db.network_mode
+        config.db.network_mode = "local"
         db = DatabaseManager()
         try:
             if action == "query":
@@ -160,6 +195,8 @@ class _DBHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"API {action} 失败: {e}", exc_info=True)
             self._json(500, {"error": str(e)})
+        finally:
+            config.db.network_mode = old_mode
 
     def do_OPTIONS(self):
         """CORS 预检"""
@@ -170,8 +207,18 @@ class _DBHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
 _server_thread: threading.Thread = None
 _server: ThreadingHTTPServer = None
+_server_bind: tuple = None
+
+
+def is_server_running() -> bool:
+    """当前进程内 DB server 是否正在运行。"""
+    return _server is not None
 
 
 def start_server_in_thread() -> threading.Thread:
@@ -179,27 +226,38 @@ def start_server_in_thread() -> threading.Thread:
     在后台线程启动 HTTP server
     适合在 GUI 主程序启动时调用,server 与 GUI 共享同一进程
     """
-    global _server_thread, _server
+    global _server_thread, _server, _server_bind
+    host = config.db.server_host
+    port = config.db.server_port
+    desired_bind = (host, port)
     if _server is not None:
-        logger.info("DB server 已在运行")
-        return _server_thread
+        if _server_bind == desired_bind:
+            logger.info("DB server 已在运行")
+            return _server_thread
+        logger.info(f"DB server 监听地址变更: {_server_bind} → {desired_bind}，正在重启")
+        stop_server()
 
     # 【v1.6.0 修复】server 启动时确保所有白名单表的 schema 已建好
     # 否则其他电脑连过来 query 会报 "no such table"
+    old_mode = config.db.network_mode
     try:
+        config.db.network_mode = "local"
         from plugins.peel_data.models import ensure_table, ensure_history_table
         ensure_table()
         ensure_history_table()
     except Exception as e:
         logger.warning(f"启动时确保表结构失败(可忽略): {e}")
+    finally:
+        config.db.network_mode = old_mode
 
     host = config.db.server_host
     port = config.db.server_port
-    _server = ThreadingHTTPServer((host, port), _DBHandler)
+    _server = _ReusableThreadingHTTPServer((host, port), _DBHandler)
     _server_thread = threading.Thread(
         target=_server.serve_forever, daemon=True, name="db-server"
     )
     _server_thread.start()
+    _server_bind = desired_bind
     logger.info(f"DB server 已启动: http://{host}:{port}")
     logger.info(f"白名单表: {sorted(ALLOWED_TABLES)}")
     if config.db.api_token:
@@ -209,8 +267,11 @@ def start_server_in_thread() -> threading.Thread:
 
 def stop_server():
     """停止 server"""
-    global _server
+    global _server_thread, _server, _server_bind
     if _server is not None:
         _server.shutdown()
+        _server.server_close()
         _server = None
+        _server_thread = None
+        _server_bind = None
         logger.info("DB server 已停止")

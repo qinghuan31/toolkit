@@ -79,6 +79,11 @@ class DatabaseClient:
 
     # === CRUD 接口(与本地 DatabaseManager 风格一致) ===
 
+    def query_sql(self, sql: str, params: list = None) -> List[Dict]:
+        """执行只读 SQL 查询（server 端会校验仅允许 SELECT 且仅访问白名单表）"""
+        body = {"sql": sql, "params": params or []}
+        return self._request("POST", "/api/query", body)
+
     def query_all(self, table: str, where: str = "1=1", params: list = None) -> List[Dict]:
         """查询多条"""
         body = {"where": where, "params": params or []}
