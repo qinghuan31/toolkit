@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - 'v*'
+      - 'V*'
   workflow_dispatch:
 
 jobs:
@@ -95,7 +96,7 @@ jobs:
             ---
 
             ### 产物
-            - `Toolkit_v1.5.0.exe` (单文件可执行,无需 Python 环境)
+            - `Toolkit_v*.exe` (单文件可执行,无需 Python 环境)
 
             ### 触发信息
             - Commit: `${{ github.sha }}`

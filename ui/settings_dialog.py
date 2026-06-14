@@ -2,26 +2,66 @@
 """
 综合设置界面
 包含：局域网多设备配置、peel_data 插件参数、配置导入导出
+v1.7.1 改版：底部统一"保存/放弃"按钮，顶部显示"未保存"标记，配置项变更不再实时落盘
 """
 
 import os
 import json
 import socket
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QPushButton, QLineEdit, QSpinBox, QComboBox,
     QGroupBox, QFormLayout, QFileDialog, QMessageBox,
     QTextEdit, QGridLayout, QSizePolicy, QCheckBox,
+    QListWidget, QListWidgetItem, QFrame, QSpacerItem,
 )
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
 
 from config import config
 from core.logger import get_logger
+from ui.styles import SETTINGS_DIALOG_STYLE
 
 logger = get_logger("settings")
+
+
+# ═══════════════════════════════════════════════════════════
+#  辅助：脏值追踪基类
+# ═══════════════════════════════════════════════════════════
+
+class _DirtyTrackerMixin:
+    """
+    给任意 QWidget 增加脏值追踪能力：
+    - 任何被注册过的子控件变化都把父对象 (SettingsDialog) 的 _dirty 设为 True
+    - 顶层 QDialog 在收到这个信号后切换"未保存"角标并启用"保存"按钮
+    """
+
+    def __init__(self, host: "SettingsDialog" = None, *args, **kwargs):
+        self._host = host
+        self._tracked_widgets: List[QWidget] = []
+
+    def _track(self, *widgets: QWidget) -> None:
+        """注册需要追踪脏值的控件"""
+        for w in widgets:
+            if w is None:
+                continue
+            self._tracked_widgets.append(w)
+            self._wire_dirty(w)
+
+    def _wire_dirty(self, w: QWidget) -> None:
+        if isinstance(w, QLineEdit):
+            w.textChanged.connect(self._mark_dirty)
+        elif isinstance(w, QSpinBox):
+            w.valueChanged.connect(self._mark_dirty)
+        elif isinstance(w, QComboBox):
+            w.currentIndexChanged.connect(self._mark_dirty)
+        elif isinstance(w, QCheckBox):
+            w.stateChanged.connect(self._mark_dirty)
+
+    def _mark_dirty(self, *_args) -> None:
+        self._host._set_dirty(True)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -56,19 +96,29 @@ class _NetworkTestWorker(QThread):
 #  局域网多设备配置 Tab
 # ═══════════════════════════════════════════════════════════
 
-class _NetworkTab(QWidget):
+class _NetworkTab(QWidget, _DirtyTrackerMixin):
     """局域网多设备访问配置"""
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, host: "SettingsDialog", parent=None):
+        QWidget.__init__(self, parent)
+        _DirtyTrackerMixin.__init__(self, host)
         self._test_worker: Optional[_NetworkTestWorker] = None
+        self._scan_worker: Optional[QThread] = None
+        self._initial: Dict[str, object] = {}
         self._setup_ui()
         self._load_current()
+        self._capture_initial()
+        self._track(
+            self._mode_combo, self._host_edit, self._port_spin,
+            self._token_edit, self._server_url_edit,
+            self._client_token_edit, self._allow_write_check,
+        )
 
+    # --- UI 构造 ---
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
 
         # === 模式选择 ===
         mode_group = QGroupBox("网络模式")
@@ -87,7 +137,7 @@ class _NetworkTab(QWidget):
 
         self._mode_hint = QLabel()
         self._mode_hint.setWordWrap(True)
-        self._mode_hint.setStyleSheet("color: #6b7280; font-size: 12px;")
+        self._mode_hint.setObjectName("hint_label")
         mode_layout.addRow("", self._mode_hint)
         layout.addWidget(mode_group)
 
@@ -97,19 +147,8 @@ class _NetworkTab(QWidget):
         server_layout.setSpacing(10)
         server_layout.setContentsMargins(16, 20, 16, 16)
 
-        # 监听地址：自动填本机局域网 IP
-        local_ip = "0.0.0.0"
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-        except Exception:
-            pass
-
         host_row = QHBoxLayout()
         self._host_edit = QLineEdit()
-        self._host_edit.setText(local_ip)
         self._host_edit.setPlaceholderText("本机局域网 IP / 0.0.0.0 监听所有网卡")
         host_row.addWidget(self._host_edit)
         btn_detect_ip = QPushButton("自动检测")
@@ -125,7 +164,6 @@ class _NetworkTab(QWidget):
         self._port_spin.setValue(8765)
         server_layout.addRow("端口：", self._port_spin)
 
-        # 服务端 Token：明文 + 复制 + 自动生成
         token_row = QHBoxLayout()
         self._token_edit = QLineEdit()
         self._token_edit.setPlaceholderText("留空则无鉴权（建议内部使用时设置）")
@@ -135,7 +173,7 @@ class _NetworkTab(QWidget):
         btn_copy_token.setObjectName("btn_secondary")
         btn_copy_token.setFixedWidth(70)
         btn_copy_token.setToolTip("复制 Token 到剪贴板")
-        btn_copy_token.clicked.connect(self._on_copy_token)
+        btn_copy_token.clicked.connect(lambda: self._on_copy_field(self._token_edit))
         token_row.addWidget(btn_copy_token)
         btn_gen_token = QPushButton("自动生成")
         btn_gen_token.setObjectName("btn_secondary")
@@ -144,7 +182,6 @@ class _NetworkTab(QWidget):
         token_row.addWidget(btn_gen_token)
         server_layout.addRow("API Token：", token_row)
 
-        # 【v1.7.0】客户端写入权限开关
         self._allow_write_check = QCheckBox("允许客户端写入数据库")
         self._allow_write_check.setToolTip(
             "勾选：客户端可读可写（默认）\n"
@@ -152,12 +189,11 @@ class _NetworkTab(QWidget):
             "建议：多人协作时由主机控制写入，避免数据冲突"
         )
         self._allow_write_check.setChecked(True)
-        self._allow_write_check.stateChanged.connect(self._save)
         server_layout.addRow("写入权限：", self._allow_write_check)
 
         layout.addWidget(self._server_group)
 
-        # === Client 配置（独立 group）===
+        # === Client 配置 ===
         self._client_group = QGroupBox("客户端配置")
         client_layout = QFormLayout(self._client_group)
         client_layout.setSpacing(10)
@@ -167,7 +203,6 @@ class _NetworkTab(QWidget):
         self._server_url_edit.setPlaceholderText("http://192.168.1.100:8765")
         client_layout.addRow("服务器地址：", self._server_url_edit)
 
-        # 客户端 Token：明文 + 复制 + 粘贴
         client_token_row = QHBoxLayout()
         self._client_token_edit = QLineEdit()
         self._client_token_edit.setPlaceholderText("与服务端 Token 一致")
@@ -208,30 +243,14 @@ class _NetworkTab(QWidget):
         discovery_btn_row.addWidget(self._btn_pair)
 
         self._discovery_status = QLabel("未扫描")
-        self._discovery_status.setStyleSheet("color: #6b7280; font-size: 12px;")
+        self._discovery_status.setObjectName("hint_label")
         discovery_btn_row.addWidget(self._discovery_status)
         discovery_btn_row.addStretch()
         discovery_layout.addLayout(discovery_btn_row)
 
-        # 设备列表
-        from PySide6.QtWidgets import QListWidget, QListWidgetItem
         self._device_list = QListWidget()
         self._device_list.setMaximumHeight(140)
-        self._device_list.setStyleSheet("""
-            QListWidget {
-                border: 1px solid #dcdfe6;
-                border-radius: 4px;
-                background: #ffffff;
-                font-size: 13px;
-            }
-            QListWidget::item {
-                padding: 6px 10px;
-            }
-            QListWidget::item:selected {
-                background: #ecf5ff;
-                color: #409eff;
-            }
-        """)
+        self._device_list.setObjectName("device_list")
         self._device_list.itemSelectionChanged.connect(self._on_device_selected)
         discovery_layout.addWidget(self._device_list)
 
@@ -249,23 +268,15 @@ class _NetworkTab(QWidget):
         test_layout.addWidget(self._btn_test)
 
         self._test_result = QLabel("未测试")
-        self._test_result.setStyleSheet("color: #6b7280; font-size: 13px;")
+        self._test_result.setObjectName("hint_label")
         test_layout.addWidget(self._test_result)
         test_layout.addStretch()
         layout.addWidget(test_group)
 
         layout.addStretch()
 
-        # 信号：值变化时实时保存
-        self._mode_combo.currentIndexChanged.connect(self._save)
-        self._host_edit.editingFinished.connect(self._save)
-        self._port_spin.valueChanged.connect(self._save)
-        self._token_edit.editingFinished.connect(self._save)
-        self._server_url_edit.editingFinished.connect(self._save)
-        self._client_token_edit.editingFinished.connect(self._save)
-
+    # --- 数据加载与初始快照 ---
     def _load_current(self):
-        """从 config 加载当前值"""
         mode = config.db.network_mode
         idx = {"local": 0, "server": 1, "client": 2}.get(mode, 0)
         self._mode_combo.setCurrentIndex(idx)
@@ -277,8 +288,41 @@ class _NetworkTab(QWidget):
         self._allow_write_check.setChecked(config.db.server_allow_write)
         self._on_mode_changed(idx)
 
+    def _capture_initial(self):
+        """记录当前界面值，'放弃' 时用来恢复"""
+        self._initial = self.collect_values()
+
+    def collect_values(self) -> Dict[str, object]:
+        """收集当前界面值，供主对话框统一保存/恢复使用"""
+        return {
+            "mode_index": self._mode_combo.currentIndex(),
+            "host": self._host_edit.text(),
+            "port": self._port_spin.value(),
+            "server_token": self._token_edit.text(),
+            "client_token": self._client_token_edit.text(),
+            "server_url": self._server_url_edit.text(),
+            "allow_write": self._allow_write_check.isChecked(),
+        }
+
+    def apply_values(self, values: Dict[str, object]) -> None:
+        """回填到 UI（用于 '放弃' 或 '保存后刷新'）"""
+        self._mode_combo.setCurrentIndex(values.get("mode_index", 0))
+        self._host_edit.setText(values.get("host", ""))
+        self._port_spin.setValue(int(values.get("port", 8765)))
+        self._token_edit.setText(values.get("server_token", ""))
+        self._client_token_edit.setText(values.get("client_token", ""))
+        self._server_url_edit.setText(values.get("server_url", ""))
+        self._allow_write_check.setChecked(bool(values.get("allow_write", True)))
+        self._on_mode_changed(self._mode_combo.currentIndex())
+
+    def is_dirty(self) -> bool:
+        """判断当前 Tab 相对初始快照是否被改动"""
+        if not self._initial:
+            return False
+        return self.collect_values() != self._initial
+
+    # --- 行为 ---
     def _on_mode_changed(self, index: int):
-        """模式切换时显示/隐藏对应配置区"""
         modes = ["local", "server", "client"]
         mode = modes[index] if index < len(modes) else "local"
 
@@ -293,40 +337,31 @@ class _NetworkTab(QWidget):
         self._mode_hint.setText(hints.get(mode, ""))
 
     def _on_generate_token(self):
-        """自动生成 32 字节随机 Token"""
         import secrets
         token = secrets.token_urlsafe(32)
         self._token_edit.setText(token)
-        self._save()
-
-    def _on_copy_token(self):
-        """复制服务端 Token 到剪贴板"""
-        self._on_copy_field(self._token_edit)
 
     def _on_copy_field(self, line_edit):
-        """复制任意 QLineEdit 内容到剪贴板"""
         from PySide6.QtWidgets import QApplication
         text = line_edit.text()
         if not text:
             QMessageBox.information(self, "提示", "字段为空，无需复制。")
             return
         QApplication.clipboard().setText(text)
-        # 状态栏式反馈（用 self 顶部的 title 区域临时显示）
         self._discovery_status.setText(f"✓ 已复制到剪贴板（{len(text)} 字符）")
-        self._discovery_status.setStyleSheet("color: #059669; font-size: 12px; font-weight: bold;")
+        self._discovery_status.setProperty("state", "success")
+        self._discovery_status.style().unpolish(self._discovery_status)
+        self._discovery_status.style().polish(self._discovery_status)
 
     def _on_paste_to_client_token(self):
-        """从剪贴板粘贴到客户端 Token 输入框"""
         from PySide6.QtWidgets import QApplication
         text = QApplication.clipboard().text().strip()
         if not text:
             QMessageBox.information(self, "提示", "剪贴板为空。")
             return
         self._client_token_edit.setText(text)
-        self._save()
 
     def _on_detect_local_ip(self):
-        """重新检测本机局域网 IP"""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -336,16 +371,16 @@ class _NetworkTab(QWidget):
             QMessageBox.warning(self, "检测失败", f"无法获取本机 IP:\n{e}\n请手动输入。")
             return
         self._host_edit.setText(ip)
-        self._save()
         QMessageBox.information(self, "检测成功", f"本机局域网 IP：{ip}")
 
     def _on_discover_devices(self):
-        """扫描局域网设备（后台线程）"""
         from core.discovery import discover_devices
 
         self._btn_discover.setEnabled(False)
         self._discovery_status.setText("正在扫描子网...")
-        self._discovery_status.setStyleSheet("color: #6b7280; font-size: 12px;")
+        self._discovery_status.setProperty("state", "info")
+        self._discovery_status.style().unpolish(self._discovery_status)
+        self._discovery_status.style().polish(self._discovery_status)
         self._device_list.clear()
 
         class _ScanWorker(QThread):
@@ -359,54 +394,53 @@ class _NetworkTab(QWidget):
         self._scan_worker.start()
 
     def _on_scan_result(self, devices: list):
-        """扫描结果回调"""
         self._btn_discover.setEnabled(True)
         self._device_list.clear()
         if not devices:
             self._discovery_status.setText("未发现其他 Toolkit 实例")
-            self._discovery_status.setStyleSheet("color: #e67e22; font-size: 12px;")
+            self._discovery_status.setProperty("state", "warning")
+            self._discovery_status.style().unpolish(self._discovery_status)
+            self._discovery_status.style().polish(self._discovery_status)
             return
 
         for d in devices:
-            from PySide6.QtWidgets import QListWidgetItem
             item = QListWidgetItem(f"  🖥  {d['ip']}:{d['port']}  ({d['mode']})")
             item.setData(Qt.ItemDataRole.UserRole, d)
             self._device_list.addItem(item)
 
         self._discovery_status.setText(f"✓ 发现 {len(devices)} 个设备")
-        self._discovery_status.setStyleSheet("color: #059669; font-size: 12px; font-weight: bold;")
+        self._discovery_status.setProperty("state", "success")
+        self._discovery_status.style().unpolish(self._discovery_status)
+        self._discovery_status.style().polish(self._discovery_status)
 
     def _on_device_selected(self):
-        """设备列表选中时启用配对按钮"""
         self._btn_pair.setEnabled(self._device_list.currentItem() is not None)
 
     def _on_pair_device(self):
-        """配对：将选中设备 URL 写入客户端服务器地址"""
         item = self._device_list.currentItem()
         if not item:
             return
         device = item.data(Qt.ItemDataRole.UserRole)
         self._server_url_edit.setText(device["url"])
-        # 自动切到 client 模式
         self._mode_combo.setCurrentIndex(2)
-        self._save()
         QMessageBox.information(
             self, "配对成功",
             f"已配对设备：\n{device['ip']}:{device['port']}\n\n"
             f"工作模式已切换为「客户端」\n"
-            f"服务器地址已填入下方输入框"
+            f"服务器地址已填入下方输入框\n\n"
+            f"⚠️ 点击底部「保存」后才会真正生效"
         )
 
     def _on_test_connection(self):
-        """测试连接"""
         mode_idx = self._mode_combo.currentIndex()
         if mode_idx == 0:
             self._test_result.setText("本地模式无需测试")
-            self._test_result.setStyleSheet("color: #6b7280; font-size: 13px;")
+            self._test_result.setProperty("state", "info")
+            self._test_result.style().unpolish(self._test_result)
+            self._test_result.style().polish(self._test_result)
             return
 
         if mode_idx == 1:
-            # Server 模式：测试本机端口
             host = self._host_edit.text().strip() or "127.0.0.1"
             if host == "0.0.0.0":
                 host = "127.0.0.1"
@@ -416,79 +450,92 @@ class _NetworkTab(QWidget):
             url = self._server_url_edit.text().strip()
             if not url:
                 self._test_result.setText("请输入服务器地址")
-                self._test_result.setStyleSheet("color: #e67e22; font-size: 13px;")
+                self._test_result.setProperty("state", "warning")
+                self._test_result.style().unpolish(self._test_result)
+                self._test_result.style().polish(self._test_result)
                 return
 
         self._btn_test.setEnabled(False)
         self._test_result.setText("正在测试...")
-        self._test_result.setStyleSheet("color: #6b7280; font-size: 13px;")
+        self._test_result.setProperty("state", "info")
+        self._test_result.style().unpolish(self._test_result)
+        self._test_result.style().polish(self._test_result)
 
         self._test_worker = _NetworkTestWorker(url)
         self._test_worker.result.connect(self._on_test_result)
         self._test_worker.start()
 
     def _on_test_result(self, ok: bool, msg: str):
-        """测试结果回调"""
         self._btn_test.setEnabled(True)
-        if ok:
-            self._test_result.setText(f"✓ {msg}")
-            self._test_result.setStyleSheet("color: #059669; font-size: 13px; font-weight: bold;")
+        prefix = "✓ " if ok else "✗ "
+        self._test_result.setText(prefix + msg)
+        self._test_result.setProperty("state", "success" if ok else "danger")
+        self._test_result.style().unpolish(self._test_result)
+        self._test_result.style().polish(self._test_result)
+
+    # --- 由主对话框调用：保存/恢复/同步运行时 ---
+    def persist_to_config(self) -> None:
+        """把当前界面值同步到 config + 同步运行时 DB server 状态"""
+        v = self.collect_values()
+        modes = ["local", "server", "client"]
+        config.db.network_mode = modes[v["mode_index"]]
+        config.db.server_host = (v["host"] or "0.0.0.0").strip() if isinstance(v["host"], str) else v["host"]
+        config.db.server_port = int(v["port"])
+        # Token: server 模式用服务端 token, client 模式用客户端 token
+        if v["mode_index"] == 1:
+            config.db.api_token = v["server_token"].strip() if isinstance(v["server_token"], str) else v["server_token"]
         else:
-            self._test_result.setText(f"✗ {msg}")
-            self._test_result.setStyleSheet("color: #dc2626; font-size: 13px; font-weight: bold;")
+            config.db.api_token = v["client_token"].strip() if isinstance(v["client_token"], str) else v["client_token"]
+        config.db.server_url = v["server_url"].strip() if isinstance(v["server_url"], str) else v["server_url"]
+        config.db.server_allow_write = bool(v["allow_write"])
+        config.save()
+        self._sync_server_runtime()
 
     def _sync_server_runtime(self):
-        """根据当前网络模式启动或停止本进程内的 DB server。"""
         try:
             from core.db_server import start_server_in_thread, stop_server, is_server_running
             if config.db.network_mode == "server":
                 start_server_in_thread()
                 self._test_result.setText(f"✓ 服务端已启动: {config.db.server_host}:{config.db.server_port}")
-                self._test_result.setStyleSheet("color: #059669; font-size: 13px; font-weight: bold;")
+                self._test_result.setProperty("state", "success")
             else:
                 if is_server_running():
                     stop_server()
                     self._test_result.setText("✓ 服务端已停止")
-                    self._test_result.setStyleSheet("color: #059669; font-size: 13px; font-weight: bold;")
+                    self._test_result.setProperty("state", "success")
         except Exception as e:
             logger.error(f"同步 DB server 运行状态失败: {e}", exc_info=True)
             self._test_result.setText(f"✗ 服务端状态同步失败: {e}")
-            self._test_result.setStyleSheet("color: #dc2626; font-size: 13px; font-weight: bold;")
-
-    def _save(self):
-        """实时保存网络配置到 config"""
-        modes = ["local", "server", "client"]
-        config.db.network_mode = modes[self._mode_combo.currentIndex()]
-        config.db.server_host = self._host_edit.text().strip() or "0.0.0.0"
-        config.db.server_port = self._port_spin.value()
-        # Token：server/client 共用同一 token
-        if self._mode_combo.currentIndex() == 1:
-            config.db.api_token = self._token_edit.text().strip()
-        else:
-            config.db.api_token = self._client_token_edit.text().strip()
-        config.db.server_url = self._server_url_edit.text().strip()
-        config.db.server_allow_write = self._allow_write_check.isChecked()
-        config.save()
-        self._sync_server_runtime()
-        logger.debug("网络配置已保存")
+            self._test_result.setProperty("state", "danger")
+        self._test_result.style().unpolish(self._test_result)
+        self._test_result.style().polish(self._test_result)
 
 
 # ═══════════════════════════════════════════════════════════
 #  peel_data 插件参数 Tab
 # ═══════════════════════════════════════════════════════════
 
-class _PluginTab(QWidget):
+class _PluginTab(QWidget, _DirtyTrackerMixin):
     """peel_data 插件参数配置"""
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, host: "SettingsDialog", parent=None):
+        QWidget.__init__(self, parent)
+        _DirtyTrackerMixin.__init__(self, host)
+        self._initial: Dict[str, object] = {}
         self._setup_ui()
         self._load_current()
+        self._capture_initial()
+        self._track(
+            self._data_dir_edit, self._db_path_edit,
+            self._pos_keywords_edit, self._neg_keywords_edit,
+            self._pos_mat_edit, self._neg_mat_edit,
+            self._cond_mat_edit, self._tape_mat_edit,
+        )
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
 
         # === 路径配置 ===
         path_group = QGroupBox("数据路径配置")
@@ -496,7 +543,6 @@ class _PluginTab(QWidget):
         path_layout.setSpacing(10)
         path_layout.setContentsMargins(16, 20, 16, 16)
 
-        # 数据目录
         data_dir_row = QHBoxLayout()
         self._data_dir_edit = QLineEdit()
         self._data_dir_edit.setPlaceholderText("上次使用的数据目录（自动记忆）")
@@ -508,7 +554,6 @@ class _PluginTab(QWidget):
         data_dir_row.addWidget(btn_browse_dir)
         path_layout.addRow("数据目录：", data_dir_row)
 
-        # 数据库路径
         db_path_row = QHBoxLayout()
         self._db_path_edit = QLineEdit()
         self._db_path_edit.setPlaceholderText("留空则使用默认路径: data/app.db")
@@ -521,7 +566,7 @@ class _PluginTab(QWidget):
         path_layout.addRow("数据库路径：", db_path_row)
 
         self._db_path_hint = QLabel("默认: {项目根}/data/app.db")
-        self._db_path_hint.setStyleSheet("color: #909399; font-size: 11px;")
+        self._db_path_hint.setObjectName("hint_label")
         path_layout.addRow("", self._db_path_hint)
 
         layout.addWidget(path_group)
@@ -532,57 +577,32 @@ class _PluginTab(QWidget):
         keyword_layout.setSpacing(10)
         keyword_layout.setContentsMargins(16, 20, 16, 16)
 
-        # 正极关键词
-        pos_label = QLabel("正极关键词（逗号分隔，试样名称包含以下任一则判定为正极）：")
-        pos_label.setStyleSheet("font-size: 12px; color: #374151;")
-        keyword_layout.addWidget(pos_label)
         self._pos_keywords_edit = QLineEdit()
         self._pos_keywords_edit.setPlaceholderText("如：正极, 阳极, Al, 铝箔")
-        keyword_layout.addWidget(self._pos_keywords_edit)
+        keyword_layout.addWidget(self._make_section_label("正极关键词（逗号分隔，试样名称包含以下任一则判定为正极）：", self._pos_keywords_edit))
 
-        # 负极关键词
-        neg_label = QLabel("负极关键词（逗号分隔，试样名称包含以下任一则判定为负极）：")
-        neg_label.setStyleSheet("font-size: 12px; color: #374151;")
-        keyword_layout.addWidget(neg_label)
         self._neg_keywords_edit = QLineEdit()
         self._neg_keywords_edit.setPlaceholderText("如：负极, 阴极, Cu, 铜箔")
-        keyword_layout.addWidget(self._neg_keywords_edit)
+        keyword_layout.addWidget(self._make_section_label("负极关键词（逗号分隔，试样名称包含以下任一则判定为负极）：", self._neg_keywords_edit))
 
-        # 材料关键词 —— 按使用范围正确归类
-        # 正极相关材料（粘结剂/正极活性物质/集流体）
-        pos_mat_label = QLabel("正极相关材料（PVDF/正极活性物质/铝箔等，逗号分隔）：")
-        pos_mat_label.setStyleSheet("font-size: 12px; color: #374151;")
-        keyword_layout.addWidget(pos_mat_label)
         self._pos_mat_edit = QLineEdit()
-        self._pos_mat_edit.setPlaceholderText("如：PVDF, 聚偏氟乙烯, 三元, NCM, NCA, LFP, 磷酸铁锂, 钴酸锂, LCO, 锰酸锂, LMO, 镍钴锰, 镍钴铝, 铝箔, 涂炭铝箔")
-        keyword_layout.addWidget(self._pos_mat_edit)
+        self._pos_mat_edit.setPlaceholderText("如：PVDF, 三元, NCM, LFP, 铝箔")
+        keyword_layout.addWidget(self._make_section_label("正极相关材料（粘结剂/正极活性物质/集流体，逗号分隔）：", self._pos_mat_edit))
 
-        # 负极相关材料（粘结剂/负极活性物质/集流体）
-        neg_mat_label = QLabel("负极相关材料（CMC/SBR/石墨/硅基/铜箔等，逗号分隔）：")
-        neg_mat_label.setStyleSheet("font-size: 12px; color: #374151;")
-        keyword_layout.addWidget(neg_mat_label)
         self._neg_mat_edit = QLineEdit()
-        self._neg_mat_edit.setPlaceholderText("如：CMC, 丁苯橡胶, SBR, 丁腈橡胶, NBR, 水性粘结剂, 石墨, 人造石墨, 天然石墨, 球形石墨, 鳞片石墨, MCMB, 中间相碳微球, 中间相沥青, 硅碳, 硅基, SiO, 氧化亚硅, 硅氧, 硅纳米, 纳米硅, 硅粉, 多孔硅, 铜箔, 涂炭铜箔")
-        keyword_layout.addWidget(self._neg_mat_edit)
+        self._neg_mat_edit.setPlaceholderText("如：CMC, SBR, 石墨, 硅基, 铜箔")
+        keyword_layout.addWidget(self._make_section_label("负极相关材料（粘结剂/负极活性物质/集流体，逗号分隔）：", self._neg_mat_edit))
 
-        # 导电剂 / 通用材料（正负极都可能用）
-        cond_mat_label = QLabel("导电剂 / 通用材料（导电液/导电炭黑/导电剂，逗号分隔）：")
-        cond_mat_label.setStyleSheet("font-size: 12px; color: #374151;")
-        keyword_layout.addWidget(cond_mat_label)
         self._cond_mat_edit = QLineEdit()
-        self._cond_mat_edit.setPlaceholderText("如：导电液, 单壁管导电液, 多壁管导电液, 碳管导电液, CNT导电液, 碳纳米管导电液, 石墨烯导电液, 银浆, KS-6, SP-Li, SP, KS6, SuperP, Super-P, 乙炔黑, 导电炭黑, VGCF, 气相生长碳纤维, 导电剂")
-        keyword_layout.addWidget(self._cond_mat_edit)
+        self._cond_mat_edit.setPlaceholderText("如：导电液, 碳纳米管, SuperP, 乙炔黑")
+        keyword_layout.addWidget(self._make_section_label("导电剂 / 通用材料（正负极都可能用，逗号分隔）：", self._cond_mat_edit))
 
-        # 胶带类（高温胶/膨胀胶/...）
-        tape_mat_label = QLabel("胶带类（高温胶/膨胀胶/阻燃胶/导热胶/结构胶，逗号分隔）：")
-        tape_mat_label.setStyleSheet("font-size: 12px; color: #374151;")
-        keyword_layout.addWidget(tape_mat_label)
         self._tape_mat_edit = QLineEdit()
-        self._tape_mat_edit.setPlaceholderText("如：高温胶, 膨胀胶, 阻燃胶, 导热胶, 结构胶, 耐高温胶, 耐低温胶, 隔膜, PE隔膜, PP隔膜, 陶瓷隔膜, 电解液, 复合箔, 极片, 浆料, 正极材料, 负极材料")
-        keyword_layout.addWidget(self._tape_mat_edit)
+        self._tape_mat_edit.setPlaceholderText("如：高温胶, 膨胀胶, 隔膜, 电解液")
+        keyword_layout.addWidget(self._make_section_label("胶带类 / 通用辅料（高温胶/膨胀胶/隔膜等，逗号分隔）：", self._tape_mat_edit))
 
-        self._keyword_hint = QLabel("提示：关键词按使用范围分类存储，实时生效。修改后点击「恢复默认」可还原。")
-        self._keyword_hint.setStyleSheet("color: #909399; font-size: 11px;")
+        self._keyword_hint = QLabel("提示：关键词按使用范围分类存储，修改后点击底部「保存」生效，「恢复默认」可还原。")
+        self._keyword_hint.setObjectName("hint_label")
         keyword_layout.addWidget(self._keyword_hint)
 
         layout.addWidget(keyword_group)
@@ -598,28 +618,41 @@ class _PluginTab(QWidget):
 
         layout.addStretch()
 
-        # 信号：值变化时实时保存
-        self._data_dir_edit.editingFinished.connect(self._save)
-        self._db_path_edit.editingFinished.connect(self._save)
-        self._pos_keywords_edit.editingFinished.connect(self._save)
-        self._neg_keywords_edit.editingFinished.connect(self._save)
-        self._pos_mat_edit.editingFinished.connect(self._save)
-        self._neg_mat_edit.editingFinished.connect(self._save)
-        self._cond_mat_edit.editingFinished.connect(self._save)
-        self._tape_mat_edit.editingFinished.connect(self._save)
+    def _make_section_label(self, text: str, target: QLineEdit) -> QWidget:
+        """生成一组说明文字 + 清空按钮 + 输入框，避免关键词区挤成一团"""
+        wrap = QWidget()
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+
+        h = QHBoxLayout()
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+
+        lbl = QLabel(text)
+        lbl.setObjectName("section_label")
+        lbl.setWordWrap(True)
+        h.addWidget(lbl, stretch=1)
+
+        clear_btn = QPushButton("清空")
+        clear_btn.setObjectName("btn_secondary")
+        clear_btn.setFixedWidth(56)
+        clear_btn.clicked.connect(lambda: target.clear())
+        h.addWidget(clear_btn, alignment=Qt.AlignmentFlag.AlignBottom)
+
+        v.addLayout(h)
+        v.addWidget(target)
+        return wrap
 
     def _load_current(self):
-        """从 config 加载当前值，按使用范围分类填入对应输入框"""
         self._data_dir_edit.setText(config.last_data_dir)
         self._db_path_edit.setText(config.db.database_path)
         self._pos_keywords_edit.setText(", ".join(config.positive_keywords))
         self._neg_keywords_edit.setText(", ".join(config.negative_keywords))
 
-        # 加载材料关键词默认分类（从 config 默认值切分）
         default_config = type(config)()
         all_materials = set(config.lithium_battery_materials or default_config.lithium_battery_materials)
 
-        # 4 大分类的"种子"关键词（与 config.py 默认值对应）
         pos_mat_seeds = {
             "PVDF", "聚偏氟乙烯", "三元", "NCM", "NCA", "LFP", "磷酸铁锂", "钴酸锂",
             "LCO", "锰酸锂", "LMO", "镍钴锰", "镍钴铝", "铝箔", "涂炭铝箔",
@@ -654,16 +687,43 @@ class _PluginTab(QWidget):
         self._cond_mat_edit.setText(", ".join(cond_mat))
         self._tape_mat_edit.setText(", ".join(tape_mat))
 
+    def _capture_initial(self):
+        self._initial = self.collect_values()
+
+    def collect_values(self) -> Dict[str, object]:
+        return {
+            "data_dir": self._data_dir_edit.text(),
+            "db_path": self._db_path_edit.text(),
+            "pos_keywords": self._pos_keywords_edit.text(),
+            "neg_keywords": self._neg_keywords_edit.text(),
+            "pos_mat": self._pos_mat_edit.text(),
+            "neg_mat": self._neg_mat_edit.text(),
+            "cond_mat": self._cond_mat_edit.text(),
+            "tape_mat": self._tape_mat_edit.text(),
+        }
+
+    def apply_values(self, values: Dict[str, object]) -> None:
+        self._data_dir_edit.setText(values.get("data_dir", ""))
+        self._db_path_edit.setText(values.get("db_path", ""))
+        self._pos_keywords_edit.setText(values.get("pos_keywords", ""))
+        self._neg_keywords_edit.setText(values.get("neg_keywords", ""))
+        self._pos_mat_edit.setText(values.get("pos_mat", ""))
+        self._neg_mat_edit.setText(values.get("neg_mat", ""))
+        self._cond_mat_edit.setText(values.get("cond_mat", ""))
+        self._tape_mat_edit.setText(values.get("tape_mat", ""))
+
+    def is_dirty(self) -> bool:
+        if not self._initial:
+            return False
+        return self.collect_values() != self._initial
+
     def _browse_data_dir(self):
-        """选择数据目录"""
         current = self._data_dir_edit.text().strip()
         path = QFileDialog.getExistingDirectory(self, "选择数据目录", current)
         if path:
             self._data_dir_edit.setText(path)
-            self._save()
 
     def _browse_db_path(self):
-        """选择数据库文件"""
         current = self._db_path_edit.text().strip()
         path, _ = QFileDialog.getSaveFileName(
             self, "选择数据库文件", current,
@@ -671,13 +731,11 @@ class _PluginTab(QWidget):
         )
         if path:
             self._db_path_edit.setText(path)
-            self._save()
 
     def _reset_keywords(self):
-        """恢复默认关键词"""
         reply = QMessageBox.question(
             self, "确认恢复",
-            "确定要将所有关键词恢复为默认值吗？",
+            "确定要将所有关键词恢复为默认值吗？\n\n恢复后请记得点击底部「保存」使其生效。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -685,36 +743,31 @@ class _PluginTab(QWidget):
 
         config.positive_keywords = ["正极", "阳极", "Al", "铝箔", "铝", "cathode", "positive"]
         config.negative_keywords = ["负极", "阴极", "Cu", "铜箔", "铜", "anode", "negative"]
-        # 材料关键词太长，用 AppConfig 的默认值
         default_config = type(config)()
         config.lithium_battery_materials = default_config.lithium_battery_materials
+        # 重新填 UI(不直接落盘，让用户走"保存")
         self._load_current()
-        self._save()
-        QMessageBox.information(self, "已恢复", "关键词已恢复为默认值。")
+        QMessageBox.information(self, "已恢复", "关键词已恢复为默认值，请点击底部「保存」生效。")
 
-    def _save(self):
-        """实时保存插件参数到 config"""
-        config.last_data_dir = self._data_dir_edit.text().strip()
-        config.db.database_path = self._db_path_edit.text().strip()
+    def persist_to_config(self) -> None:
+        v = self.collect_values()
+        config.last_data_dir = v["data_dir"].strip() if isinstance(v["data_dir"], str) else v["data_dir"]
+        config.db.database_path = v["db_path"].strip() if isinstance(v["db_path"], str) else v["db_path"]
 
-        # 解析关键词
-        pos_text = self._pos_keywords_edit.text().strip()
-        config.positive_keywords = [k.strip() for k in pos_text.split(",") if k.strip()]
+        def _parse(text):
+            if not isinstance(text, str):
+                return []
+            return [k.strip() for k in text.split(",") if k.strip()]
 
-        neg_text = self._neg_keywords_edit.text().strip()
-        config.negative_keywords = [k.strip() for k in neg_text.split(",") if k.strip()]
+        config.positive_keywords = _parse(v["pos_keywords"])
+        config.negative_keywords = _parse(v["neg_keywords"])
 
-        # 合并 4 类材料关键词（保持原 storage 兼容）
-        materials = []
-        for edit in (self._pos_mat_edit, self._neg_mat_edit, self._cond_mat_edit, self._tape_mat_edit):
-            text = edit.text().strip()
-            materials.extend(k.strip() for k in text.split(",") if k.strip())
-        # 去重保序
+        materials: List[str] = []
+        for k in (v["pos_mat"], v["neg_mat"], v["cond_mat"], v["tape_mat"]):
+            materials.extend(_parse(k))
         seen = set()
-        config.lithium_battery_materials = [k for k in materials if not (k in seen or seen.add(k))]
-
+        config.lithium_battery_materials = [x for x in materials if not (x in seen or seen.add(x))]
         config.save()
-        logger.debug("插件参数已保存")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -724,14 +777,15 @@ class _PluginTab(QWidget):
 class _ImportExportTab(QWidget):
     """配置导入导出"""
 
-    def __init__(self, parent=None):
+    def __init__(self, host: "SettingsDialog", parent=None):
         super().__init__(parent)
+        self._host = host
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
 
         # === 导出 ===
         export_group = QGroupBox("导出配置")
@@ -744,7 +798,7 @@ class _ImportExportTab(QWidget):
             "导出内容包含：网络配置、插件参数、关键词等所有设置。"
         )
         export_desc.setWordWrap(True)
-        export_desc.setStyleSheet("color: #6b7280; font-size: 12px;")
+        export_desc.setObjectName("hint_label")
         export_layout.addWidget(export_desc)
 
         btn_export = QPushButton("导出配置文件...")
@@ -762,11 +816,11 @@ class _ImportExportTab(QWidget):
         import_layout.setContentsMargins(16, 20, 16, 16)
 
         import_desc = QLabel(
-            "从 JSON 配置文件导入设置。导入后会覆盖当前配置。"
+            "从 JSON 配置文件导入设置。导入后会覆盖当前所有配置。"
             "建议先导出当前配置作为备份。"
         )
         import_desc.setWordWrap(True)
-        import_desc.setStyleSheet("color: #6b7280; font-size: 12px;")
+        import_desc.setObjectName("hint_label")
         import_layout.addWidget(import_desc)
 
         btn_import = QPushButton("导入配置文件...")
@@ -785,7 +839,7 @@ class _ImportExportTab(QWidget):
         self._preview_text = QTextEdit()
         self._preview_text.setReadOnly(True)
         self._preview_text.setFont(QFont("Consolas", 11))
-        self._preview_text.setMaximumHeight(200)
+        self._preview_text.setMaximumHeight(220)
         preview_layout.addWidget(self._preview_text)
 
         btn_refresh = QPushButton("刷新预览")
@@ -799,14 +853,12 @@ class _ImportExportTab(QWidget):
         self._refresh_preview()
 
     def _refresh_preview(self):
-        """刷新配置预览"""
         data = config.export_settings()
         self._preview_text.setPlainText(
             json.dumps(data, ensure_ascii=False, indent=2)
         )
 
     def _on_export(self):
-        """导出配置"""
         default_name = "toolkit_config.json"
         path, _ = QFileDialog.getSaveFileName(
             self, "导出配置", default_name,
@@ -831,7 +883,6 @@ class _ImportExportTab(QWidget):
             QMessageBox.critical(self, "导出失败", f"导出配置时发生错误:\n{e}")
 
     def _on_import(self):
-        """导入配置"""
         path, _ = QFileDialog.getOpenFileName(
             self, "导入配置", "",
             "JSON 文件 (*.json);;所有文件 (*)",
@@ -861,8 +912,11 @@ class _ImportExportTab(QWidget):
             QMessageBox.information(
                 self, "导入成功",
                 "配置已导入并生效。\n"
-                "部分设置（如数据库路径）需要重启应用后生效。"
+                "部分设置（如数据库路径）需要重启应用后生效。\n\n"
+                "本对话框中的输入框已自动同步最新值。"
             )
+            # 通知 host 重新加载所有 Tab
+            self._host.reload_all_tabs()
             logger.info(f"配置已导入: {path}")
         except json.JSONDecodeError as e:
             QMessageBox.critical(self, "JSON 解析失败", f"配置文件不是有效的 JSON:\n{e}")
@@ -875,156 +929,217 @@ class _ImportExportTab(QWidget):
 # ═══════════════════════════════════════════════════════════
 
 class SettingsDialog(QDialog):
-    """综合设置界面（Tab 组织三个模块）"""
+    """
+    综合设置界面（Tab 组织三个模块）
+    v1.7.1：底部统一「保存 / 放弃 / 关闭」按钮
+            顶部「未保存」角标 + 各 Tab 标题右侧小圆点提示
+            任何配置项改动不再实时落盘，必须点「保存」才生效
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Toolkit 综合设置")
-        self.setMinimumSize(700, 580)
-        self.resize(760, 620)
-        self._apply_style()
+        self.setMinimumSize(720, 600)
+        self.resize(780, 640)
+        self._dirty = False
+        self._initial_snapshots: Dict[str, Dict] = {}
         self._setup_ui()
+        self._apply_style()
+        # 进入时禁用保存按钮
+        self._set_dirty(False)
 
-    def _apply_style(self):
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #fafbfc;
-            }
-            QGroupBox {
-                font-weight: bold;
-                font-size: 13px;
-                border: 1px solid #dcdfe6;
-                border-radius: 6px;
-                margin-top: 12px;
-                padding: 16px 12px 12px 12px;
-                background-color: #ffffff;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                padding: 2px 10px;
-                color: #303133;
-            }
-            QTabWidget::pane {
-                border: 1px solid #dcdfe6;
-                border-radius: 4px;
-                background: #ffffff;
-            }
-            QTabBar::tab {
-                background: #f5f7fa;
-                border: 1px solid #dcdfe6;
-                padding: 8px 16px;
-                margin-right: 2px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                font-size: 13px;
-            }
-            QTabBar::tab:selected {
-                background: #ffffff;
-                border-bottom-color: #ffffff;
-                color: #409eff;
-                font-weight: bold;
-            }
-            QTabBar::tab:hover:!selected {
-                background: #ecf5ff;
-            }
-            QLineEdit, QSpinBox, QComboBox {
-                border: 1px solid #dcdfe6;
-                border-radius: 4px;
-                padding: 6px 10px;
-                background-color: #ffffff;
-                min-height: 28px;
-                font-size: 13px;
-            }
-            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-                border-color: #409eff;
-            }
-            QTextEdit {
-                border: 1px solid #dcdfe6;
-                border-radius: 4px;
-                padding: 6px;
-                background-color: #ffffff;
-                font-family: "Consolas", "Microsoft YaHei", monospace;
-                font-size: 12px;
-            }
-            QPushButton {
-                padding: 8px 20px;
-                border-radius: 4px;
-                font-size: 13px;
-                min-height: 32px;
-            }
-            QPushButton#btn_success {
-                background-color: #67c23a;
-                color: white;
-                border: none;
-            }
-            QPushButton#btn_success:hover {
-                background-color: #85ce61;
-            }
-            QPushButton#btn_primary {
-                background-color: #409eff;
-                color: white;
-                border: none;
-            }
-            QPushButton#btn_primary:hover {
-                background-color: #66b1ff;
-            }
-            QPushButton#btn_warning {
-                background-color: #e6a23c;
-                color: white;
-                border: none;
-            }
-            QPushButton#btn_warning:hover {
-                background-color: #ebb563;
-            }
-            QPushButton#btn_secondary {
-                background-color: #909399;
-                color: white;
-                border: none;
-            }
-            QPushButton#btn_secondary:hover {
-                background-color: #a6a9ad;
-            }
-        """)
-
+    # --- UI 构造 ---
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(12)
 
-        # 标题
+        # ===== 顶部标题 + 未保存角标 =====
+        header = QHBoxLayout()
         title = QLabel("⚙ 综合设置")
         title.setObjectName("title_label")
-        title.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(title)
+        header.addWidget(title)
 
-        # Tab 容器
-        tabs = QTabWidget()
+        self._dirty_badge = QLabel("● 未保存")
+        self._dirty_badge.setObjectName("dirty_badge")
+        self._dirty_badge.setVisible(False)
+        header.addWidget(self._dirty_badge)
+        header.addStretch()
 
-        self._network_tab = _NetworkTab()
-        tabs.addTab(self._network_tab, "🌐 局域网配置")
+        from config import get_version
+        ver_lbl = QLabel(f"v{get_version()}")
+        ver_lbl.setObjectName("hint_label")
+        header.addWidget(ver_lbl)
 
-        self._plugin_tab = _PluginTab()
-        # Tab 标题用插件 display_name（与侧边栏一致），fallback 到 plugin name
+        layout.addLayout(header)
+
+        # ===== Tab 容器 =====
+        self._tabs = QTabWidget()
+
+        self._network_tab = _NetworkTab(self)
+        self._tabs.addTab(self._network_tab, "🌐 局域网配置")
+
+        self._plugin_tab = _PluginTab(self)
         try:
             from plugins.peel_data.plugin import PeelDataPlugin
             plugin_display = PeelDataPlugin().display_name
         except Exception:
             plugin_display = "peel_data"
-        tabs.addTab(self._plugin_tab, f"📋 {plugin_display} 参数")
+        self._tabs.addTab(self._plugin_tab, f"📋 {plugin_display} 参数")
 
-        self._import_export_tab = _ImportExportTab()
-        tabs.addTab(self._import_export_tab, "💾 导入/导出")
+        self._import_export_tab = _ImportExportTab(self)
+        self._tabs.addTab(self._import_export_tab, "💾 导入/导出")
 
-        layout.addWidget(tabs, stretch=1)
+        # Tab 切换后重新计算脏值状态
+        self._tabs.currentChanged.connect(self._refresh_dirty_state)
 
-        # 底部按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
+        layout.addWidget(self._tabs, stretch=1)
 
-        btn_close = QPushButton("关闭")
-        btn_close.setMinimumWidth(90)
-        btn_close.clicked.connect(self.accept)
-        btn_layout.addWidget(btn_close)
+        # ===== 底部按钮 =====
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
 
-        layout.addLayout(btn_layout)
+        self._hint_label = QLabel("所有改动仅在「保存」后生效。")
+        self._hint_label.setObjectName("hint_label")
+        btn_row.addWidget(self._hint_label)
+        btn_row.addStretch()
+
+        self._btn_revert = QPushButton("放弃改动")
+        self._btn_revert.setObjectName("btn_secondary")
+        self._btn_revert.setMinimumWidth(96)
+        self._btn_revert.clicked.connect(self._on_revert)
+        self._btn_revert.setEnabled(False)
+        btn_row.addWidget(self._btn_revert)
+
+        self._btn_save = QPushButton("💾 保存")
+        self._btn_save.setObjectName("btn_primary")
+        self._btn_save.setMinimumWidth(96)
+        self._btn_save.clicked.connect(self._on_save)
+        self._btn_save.setEnabled(False)
+        btn_row.addWidget(self._btn_save)
+
+        self._btn_close = QPushButton("关闭")
+        self._btn_close.setMinimumWidth(80)
+        self._btn_close.clicked.connect(self._on_close_requested)
+        btn_row.addWidget(self._btn_close)
+
+        layout.addLayout(btn_row)
+
+    def _apply_style(self):
+        self.setStyleSheet(SETTINGS_DIALOG_STYLE)
+
+    # --- 脏值管理 ---
+    def _set_dirty(self, dirty: bool):
+        self._dirty = bool(dirty)
+        self._dirty_badge.setVisible(self._dirty)
+        self._btn_save.setEnabled(self._dirty)
+        self._btn_revert.setEnabled(self._dirty)
+        if self._dirty:
+            self._hint_label.setText("⚠ 有未保存的改动 — 点击「保存」或「放弃改动」")
+            self._hint_label.setProperty("state", "warning")
+        else:
+            self._hint_label.setText("所有改动仅在「保存」后生效。")
+            self._hint_label.setProperty("state", "info")
+        self._hint_label.style().unpolish(self._hint_label)
+        self._hint_label.style().polish(self._hint_label)
+        # 同步各 Tab 标题右侧小圆点
+        for idx, tab in enumerate(self._tabs_widgets()):
+            text = self._tabs.tabText(idx)
+            if self._tab_is_dirty(tab) and "●" not in text:
+                self._tabs.setTabText(idx, text + "  ●")
+            elif not self._tab_is_dirty(tab):
+                self._tabs.setTabText(idx, text.replace("  ●", ""))
+
+    def _tabs_widgets(self) -> List[QWidget]:
+        return [self._network_tab, self._plugin_tab]
+
+    def _tab_is_dirty(self, tab) -> bool:
+        if hasattr(tab, "is_dirty"):
+            try:
+                return tab.is_dirty()
+            except Exception:
+                return False
+        return False
+
+    def _refresh_dirty_state(self, *_):
+        # 不自动改 self._dirty —— Tab 内部已发出脏值信号
+        # 这里只是检查整体状态,用于刚打开时(无改动)的初始化
+        any_dirty = any(self._tab_is_dirty(t) for t in self._tabs_widgets())
+        self._set_dirty(any_dirty)
+
+    def reload_all_tabs(self):
+        """导入配置后由 ImportExport Tab 调用,重新从 config 读值"""
+        self._network_tab._load_current()
+        self._network_tab._capture_initial()
+        self._plugin_tab._load_current()
+        self._plugin_tab._capture_initial()
+        self._set_dirty(False)
+        # 导入配置可能影响 server 运行时
+        self._network_tab._sync_server_runtime()
+
+    # --- 底部按钮事件 ---
+    def _on_save(self):
+        try:
+            # 顺序：先网络（涉及 server 启停），再插件参数
+            self._network_tab.persist_to_config()
+            self._plugin_tab.persist_to_config()
+        except Exception as e:
+            logger.error(f"保存配置失败: {e}", exc_info=True)
+            QMessageBox.critical(self, "保存失败", f"保存配置时发生错误:\n{e}")
+            return
+
+        # 重新快照
+        self._network_tab._capture_initial()
+        self._plugin_tab._capture_initial()
+        self._set_dirty(False)
+
+        self._status_flash("✓ 已保存", "success")
+        logger.info("综合设置已保存")
+
+    def _on_revert(self):
+        reply = QMessageBox.question(
+            self, "放弃改动",
+            "确定要放弃所有未保存的改动吗？\n所有未保存的值将恢复为保存时的状态。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        # 从 config 重新读值即可
+        self.reload_all_tabs()
+        self._status_flash("已放弃改动", "info")
+
+    def _on_close_requested(self):
+        if self._dirty:
+            reply = QMessageBox.question(
+                self, "未保存的改动",
+                "你有未保存的改动，确定要关闭吗？\n\n"
+                "「是」= 放弃改动并关闭\n"
+                "「否」= 留在当前窗口继续编辑",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self.accept()
+
+    def _status_flash(self, text: str, state: str = "info", ms: int = 2000):
+        """在顶部状态行临时显示一条消息,自动消失"""
+        self._hint_label.setText(text)
+        self._hint_label.setProperty("state", state)
+        self._hint_label.style().unpolish(self._hint_label)
+        self._hint_label.style().polish(self._hint_label)
+
+    def closeEvent(self, event):
+        if self._dirty:
+            reply = QMessageBox.question(
+                self, "未保存的改动",
+                "你有未保存的改动，确定要关闭吗？\n\n"
+                "「是」= 放弃改动并关闭\n"
+                "「否」= 留在当前窗口继续编辑",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        event.accept()

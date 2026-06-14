@@ -141,18 +141,52 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(14)
 
-        welcome = QLabel("欢迎使用 Toolkit")
-        welcome.setObjectName("title_label")
-        welcome.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(welcome)
+        # 大标题
+        big = QLabel("🛠  Toolkit")
+        big_font = QFont()
+        big_font.setPointSize(28)
+        big_font.setBold(True)
+        big.setFont(big_font)
+        big.setStyleSheet("color: #1f2937;")
+        big.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(big)
 
-        hint = QLabel("请从左侧选择一个工具开始使用")
-        hint.setObjectName("status_label")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet("font-size: 14px; margin-top: 10px;")
-        layout.addWidget(hint)
+        # 副标题
+        sub = QLabel("锂电材料数据处理工具集")
+        sub.setStyleSheet("color: #6b7280; font-size: 15px;")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(sub)
 
+        # 引导提示卡片
+        hint_card = QFrame()
+        hint_card.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 10px;
+            }
+        """)
+        hint_layout = QVBoxLayout(hint_card)
+        hint_layout.setContentsMargins(24, 18, 24, 18)
+        hint_layout.setSpacing(8)
+
+        h1 = QLabel("从左侧选择一个工具开始使用")
+        h1.setStyleSheet("color: #1f2937; font-size: 15px; font-weight: 600;")
+        h1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint_layout.addWidget(h1)
+
+        from config import get_version
+        h2 = QLabel(f"当前版本 v{get_version()} · 点击「版本动态」查看更新说明")
+        h2.setStyleSheet("color: #6b7280; font-size: 12px;")
+        h2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint_layout.addWidget(h2)
+
+        layout.addSpacing(20)
+        layout.addWidget(hint_card, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        layout.addStretch()
         return page
 
     def _load_plugins(self):
