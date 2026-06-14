@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
@@ -108,9 +108,11 @@ class HistoryPage(QWidget):
         super().__init__(parent)
         self.setObjectName("history_page")
         self._batches: List[Dict] = []  # 当前展示的批次列表
+        self._detail_cache: Dict[str, List[Dict]] = {}
+        self._pending_detail_request_id: Optional[str] = None
         self._current_request_id: Optional[str] = None
         self._setup_ui()
-        self.refresh()
+        QTimer.singleShot(0, self.refresh)
 
     # --- UI ---
     def _setup_ui(self):
@@ -172,6 +174,7 @@ class HistoryPage(QWidget):
         self._batch_list = QListWidget()
         self._batch_list.setObjectName("history_batch_list")
         self._batch_list.itemSelectionChanged.connect(self._on_batch_selected)
+        self._batch_list.itemClicked.connect(lambda _item: self._on_batch_selected())
         left_layout.addWidget(self._batch_list, stretch=1)
 
         splitter.addWidget(left)
@@ -215,6 +218,10 @@ class HistoryPage(QWidget):
     # --- 数据加载 ---
     def refresh(self):
         """重新加载批次聚合（从 peel_data_extraction_history）"""
+        self._detail_cache.clear()
+        self._pending_detail_request_id = None
+        self._detail_table.setRowCount(0)
+        self._summary.set_summary("正在加载历史批次", "如果历史很多，会先显示批次列表，再按需加载右侧明细。", 0, 0, 0, 0)
         self._batches = self._load_batches()
         self._apply_filter()
 
@@ -277,8 +284,10 @@ class HistoryPage(QWidget):
         self._count_badge.setText(f"{self._batch_list.count()} 个批次")
         if self._batch_list.count() > 0:
             self._batch_list.setCurrentRow(0)
+            self._on_batch_selected()
         else:
             self._current_request_id = None
+            self._pending_detail_request_id = None
             self._summary.set_summary("暂无匹配批次", "调整搜索词或刷新重试。", 0, 0, 0, 0)
             self._detail_table.setRowCount(0)
 
@@ -297,12 +306,16 @@ class HistoryPage(QWidget):
         item = self._batch_list.currentItem()
         if not item:
             self._current_request_id = None
+            self._pending_detail_request_id = None
             return
         batch = item.data(Qt.ItemDataRole.UserRole)
         self._current_request_id = batch.get("request_id")
-        self._load_detail(batch)
+        self._show_batch_summary(batch)
+        self._detail_table.setRowCount(0)
+        self._pending_detail_request_id = self._current_request_id
+        QTimer.singleShot(0, lambda b=batch: self._load_detail_deferred(b))
 
-    def _load_detail(self, batch: Dict):
+    def _show_batch_summary(self, batch: Dict):
         rid = batch.get("request_id", "")
         short = rid[:8] if rid else "—"
         meta_lines = [
@@ -319,13 +332,25 @@ class HistoryPage(QWidget):
             skip=batch.get("skip", 0),
         )
 
-        # 加载该 request_id 下所有文件级历史
-        rows: List[tuple] = []
+    def _load_detail_deferred(self, batch: Dict):
+        rid = batch.get("request_id", "")
+        if not rid or rid != self._pending_detail_request_id:
+            return
+        rows = self._detail_cache.get(rid)
+        if rows is None:
+            rows = self._fetch_detail_rows(rid)
+            self._detail_cache[rid] = rows
+        if rid != self._current_request_id:
+            return
+        self._render_detail_rows(rows)
+
+    def _fetch_detail_rows(self, rid: str) -> List[Dict]:
+        """读取当前批次明细。该步骤按需执行，避免历史页首屏一次性渲染大表。"""
         try:
             from plugins.peel_data.models import get_history_table_name
             table = get_history_table_name()
             db = DatabaseManager()
-            rows = db.query_all(
+            return db.query_all(
                 f'SELECT "file_name", "file_path", "success", "reason", "operation_time" '
                 f'FROM "{table}" WHERE "request_id" = ? '
                 f'ORDER BY "operation_time" ASC',
@@ -333,7 +358,11 @@ class HistoryPage(QWidget):
             ) or []
         except Exception as e:
             logger.error(f"加载批次明细失败: {e}", exc_info=True)
+            return []
 
+    def _render_detail_rows(self, rows: List[Dict]):
+        self._detail_table.setUpdatesEnabled(False)
+        self._detail_table.setSortingEnabled(False)
         self._detail_table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             file_name = row.get("file_name", "") or ""
@@ -360,3 +389,10 @@ class HistoryPage(QWidget):
 
             self._detail_table.setItem(r, 3, QTableWidgetItem(reason))
             self._detail_table.setItem(r, 4, QTableWidgetItem(op_time))
+        self._detail_table.setUpdatesEnabled(True)
+
+    def _load_detail(self, batch: Dict):
+        """兼容旧调用：立即加载并渲染一个批次。"""
+        self._show_batch_summary(batch)
+        rows = self._fetch_detail_rows(batch.get("request_id", ""))
+        self._render_detail_rows(rows)

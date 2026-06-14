@@ -199,6 +199,8 @@ def ensure_history_table() -> str:
         )
         """
         db.create_table(table_name, ddl)
+        db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_request_id" ON "{table_name}" ("request_id")')
+        db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_operation_time" ON "{table_name}" ("operation_time")')
         logger.info(f"历史记录表已创建: {table_name}")
     else:
         # 向后兼容：检查并添加 operation_time 列
@@ -208,6 +210,10 @@ def ensure_history_table() -> str:
                 f'ALTER TABLE "{table_name}" ADD COLUMN "operation_time" TEXT DEFAULT \'\''
             )
             logger.info(f"已添加新列 operation_time 到表 {table_name}")
+
+    # 历史页按 request_id 聚合与按 operation_time 排序非常频繁；旧库也补索引，避免点击历史页时全表扫描。
+    db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_request_id" ON "{table_name}" ("request_id")')
+    db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_operation_time" ON "{table_name}" ("operation_time")')
 
 
 class PeelDataQuery:
