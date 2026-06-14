@@ -59,7 +59,7 @@ class AppConfig:
     app_name: str = "Toolkit"
     # 【v1.5.1 单一来源】全项目版本号统一从此处读取
     # 不再在 plugin.py / main_window.py / toolkit.spec / release.yml 硬编码
-    app_version: str = "1.7.2"
+    app_version: str = "1.7.4"
     organization: str = "WorkBuddy"
 
     # GitHub 仓库信息 —— 用于自动更新检查

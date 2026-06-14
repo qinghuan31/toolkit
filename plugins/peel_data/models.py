@@ -169,12 +169,15 @@ def get_history_table_name() -> str:
 
 
 def ensure_history_table() -> str:
-    """确保提取历史记录表存在；若缺少 operation_time 列则自动添加。
+    """确保提取历史记录表存在；若缺少 operation_time / plugin 列则自动添加。
     返回当前使用的表名。
 
     【v1.7.0 命名规范迁移】
     旧表名 extraction_history → 新表名 peel_data_extraction_history
     若检测到旧表存在且新表不存在，自动 RENAME 迁移。
+
+    【v1.7.4 全局历史解耦】
+    新增 `plugin` 列（默认 `peel_data`，兼容旧数据），让全局历史页可按插件筛选聚合。
     """
     db = DatabaseManager()
     old_table_name = "extraction_history"
@@ -194,6 +197,7 @@ def ensure_history_table() -> str:
             "success"        INTEGER NOT NULL DEFAULT 0,
             "reason"         TEXT    DEFAULT '',
             "request_id"     TEXT    DEFAULT '',
+            "plugin"         TEXT    DEFAULT 'peel_data',
             "operation_time" TEXT    DEFAULT '',
             "created_at"     TEXT    DEFAULT (datetime('now','localtime'))
         )
@@ -201,19 +205,27 @@ def ensure_history_table() -> str:
         db.create_table(table_name, ddl)
         db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_request_id" ON "{table_name}" ("request_id")')
         db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_operation_time" ON "{table_name}" ("operation_time")')
+        db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_plugin" ON "{table_name}" ("plugin")')
         logger.info(f"历史记录表已创建: {table_name}")
     else:
-        # 向后兼容：检查并添加 operation_time 列
+        # 向后兼容：检查并添加新列
         existing_cols = db.get_table_columns(table_name)
         if "operation_time" not in existing_cols:
             db.execute(
                 f'ALTER TABLE "{table_name}" ADD COLUMN "operation_time" TEXT DEFAULT \'\''
             )
             logger.info(f"已添加新列 operation_time 到表 {table_name}")
+        if "plugin" not in existing_cols:
+            # 默认填充 peel_data，兼容旧历史数据归属
+            db.execute(
+                f'ALTER TABLE "{table_name}" ADD COLUMN "plugin" TEXT DEFAULT \'peel_data\''
+            )
+            logger.info(f"已添加新列 plugin 到表 {table_name}（默认 peel_data）")
 
     # 历史页按 request_id 聚合与按 operation_time 排序非常频繁；旧库也补索引，避免点击历史页时全表扫描。
     db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_request_id" ON "{table_name}" ("request_id")')
     db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_operation_time" ON "{table_name}" ("operation_time")')
+    db.execute(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_plugin" ON "{table_name}" ("plugin")')
 
 
 class PeelDataQuery:

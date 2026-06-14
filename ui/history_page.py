@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QComboBox,
 )
 
 from core.logger import get_logger
@@ -111,7 +112,10 @@ class HistoryPage(QWidget):
         self._detail_cache: Dict[str, List[Dict]] = {}
         self._pending_detail_request_id: Optional[str] = None
         self._current_request_id: Optional[str] = None
+        self._available_plugins: List[Dict[str, str]] = []  # 来自 PluginManager
+        self._current_plugin: str = "__all__"  # __all__ 表示不按插件过滤
         self._setup_ui()
+        self._reload_available_plugins()
         QTimer.singleShot(0, self.refresh)
 
     # --- UI ---
@@ -139,6 +143,13 @@ class HistoryPage(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
+
+        toolbar.addWidget(QLabel("功能块："))
+        self._plugin_combo = QComboBox()
+        self._plugin_combo.setObjectName("history_plugin_combo")
+        self._plugin_combo.setMinimumWidth(140)
+        self._plugin_combo.currentIndexChanged.connect(self._on_plugin_changed)
+        toolbar.addWidget(self._plugin_combo)
 
         toolbar.addWidget(QLabel("搜索："))
         self._search_edit = QLineEdit()
@@ -222,11 +233,72 @@ class HistoryPage(QWidget):
         self._pending_detail_request_id = None
         self._detail_table.setRowCount(0)
         self._summary.set_summary("正在加载历史批次", "如果历史很多，会先显示批次列表，再按需加载右侧明细。", 0, 0, 0, 0)
+        self._reload_available_plugins()
+        self._batches = self._load_batches()
+        self._apply_filter()
+
+    def _reload_available_plugins(self):
+        """从 PluginManager 拉取已注册插件，更新功能块下拉框。
+        如果拉不到（PluginManager 单例未注入），至少保留「全部功能块」与「数据提取」两项。
+        """
+        plugins: List[Dict[str, str]] = []
+        try:
+            from core.plugin_manager import PluginManager
+            pm = PluginManager()
+            for name, plugin in pm.get_all_plugins().items():
+                plugins.append({
+                    "name": name,
+                    "display": getattr(plugin, "display_name", name) or name,
+                })
+        except Exception as e:
+            logger.warning(f"读取插件列表失败（保留默认项）: {e}")
+
+        # 始终确保有「全部」与「数据提取」兜底
+        have_peel = any(p["name"] == "peel_data" for p in plugins)
+        have_all = False
+        for p in plugins:
+            if p["name"] == "__all__":
+                have_all = True
+                break
+        if not have_all:
+            plugins.insert(0, {"name": "__all__", "display": "全部功能块"})
+        if not have_peel:
+            plugins.append({"name": "peel_data", "display": "数据提取（兜底）"})
+
+        # 顺序：全部 → 其他插件
+        plugins.sort(key=lambda p: (0 if p["name"] == "__all__" else 1, p["display"]))
+
+        if plugins == self._available_plugins:
+            return  # 列表无变化，避免触发 currentIndexChanged
+        self._available_plugins = plugins
+
+        self._plugin_combo.blockSignals(True)
+        self._plugin_combo.clear()
+        for p in plugins:
+            self._plugin_combo.addItem(p["display"], p["name"])
+        # 恢复上次选择（默认「全部」）
+        target_idx = 0
+        for i, p in enumerate(plugins):
+            if p["name"] == self._current_plugin:
+                target_idx = i
+                break
+        self._plugin_combo.setCurrentIndex(target_idx)
+        self._plugin_combo.blockSignals(False)
+
+    def _on_plugin_changed(self, _index: int):
+        plugin_name = self._plugin_combo.currentData() or "__all__"
+        if plugin_name == self._current_plugin:
+            return
+        self._current_plugin = plugin_name
+        self._detail_cache.clear()
+        self._pending_detail_request_id = None
         self._batches = self._load_batches()
         self._apply_filter()
 
     def _load_batches(self) -> List[Dict]:
-        """按 request_id 聚合历史表，统计每批次的成功/失败/跳过数。"""
+        """按 request_id 聚合历史表，统计每批次的成功/失败/跳过数。
+        优先读取 plugin 列；若不存在则按 request_id 聚合后回填默认插件名。
+        """
         try:
             from plugins.peel_data.models import ensure_history_table, get_history_table_name
             ensure_history_table()
@@ -238,7 +310,8 @@ class HistoryPage(QWidget):
                 f'SUM(CASE WHEN "success"=1 THEN 1 ELSE 0 END) AS ok, '
                 f'SUM(CASE WHEN "success"=0 THEN 1 ELSE 0 END) AS fail, '
                 f'MIN("operation_time") AS first_at, '
-                f'MAX("operation_time") AS last_at '
+                f'MAX("operation_time") AS last_at, '
+                f'COALESCE(MIN("plugin"), "peel_data") AS plugin '
                 f'FROM "{table}" '
                 f'WHERE "request_id" IS NOT NULL AND "request_id" != "" '
                 f'GROUP BY "request_id" '
@@ -252,8 +325,12 @@ class HistoryPage(QWidget):
         for r in rows or []:
             # query_all 返回 Dict[str, Any]
             req_id = r.get("request_id", "")
+            plugin_name = r.get("plugin") or "peel_data"
+            if self._current_plugin != "__all__" and plugin_name != self._current_plugin:
+                continue
             batches.append({
                 "request_id": req_id,
+                "plugin": plugin_name,
                 "total": r.get("total", 0) or 0,
                 "ok": r.get("ok", 0) or 0,
                 "fail": r.get("fail", 0) or 0,
@@ -272,6 +349,7 @@ class HistoryPage(QWidget):
         for b in self._batches:
             blob = " ".join([
                 b.get("request_id", ""),
+                b.get("plugin", ""),
                 b.get("first_at", ""),
                 b.get("last_at", ""),
             ]).lower()
@@ -299,7 +377,8 @@ class HistoryPage(QWidget):
         ok = b.get("ok", 0)
         fail = b.get("fail", 0)
         total = b.get("total", 0)
-        return f"批次 {short}… · {last}  · {ok}/{total} 成功  · {fail} 失败"
+        plugin = b.get("plugin") or "peel_data"
+        return f"[{plugin}] 批次 {short}… · {last}  · {ok}/{total} 成功  · {fail} 失败"
 
     # --- 详情 ---
     def _on_batch_selected(self):
@@ -318,13 +397,15 @@ class HistoryPage(QWidget):
     def _show_batch_summary(self, batch: Dict):
         rid = batch.get("request_id", "")
         short = rid[:8] if rid else "—"
+        plugin_name = batch.get("plugin") or "peel_data"
         meta_lines = [
+            f"功能块：{plugin_name}",
             f"批次号：{rid}",
             f"起始时间：{batch.get('first_at', '—')}",
             f"结束时间：{batch.get('last_at', '—')}",
         ]
         self._summary.set_summary(
-            title=f"批次 {short}…",
+            title=f"[{plugin_name}] 批次 {short}…",
             meta="\n".join(meta_lines),
             total=batch.get("total", 0),
             ok=batch.get("ok", 0),
@@ -351,7 +432,8 @@ class HistoryPage(QWidget):
             table = get_history_table_name()
             db = DatabaseManager()
             return db.query_all(
-                f'SELECT "file_name", "file_path", "success", "reason", "operation_time" '
+                f'SELECT "file_name", "file_path", "success", "reason", "operation_time", '
+                f'COALESCE("plugin", \'peel_data\') AS plugin '
                 f'FROM "{table}" WHERE "request_id" = ? '
                 f'ORDER BY "operation_time" ASC',
                 (rid,),

@@ -390,7 +390,10 @@ class PeelDataExtractor:
         return list(seen.values()), skipped
 
     def _save_history_to_db(self, history: List[FileHistory], request_id: str):
-        """将提取历史写入 peel_data_extraction_history 表"""
+        """将提取历史写入 peel_data_extraction_history 表
+        【v1.7.4 全局历史解耦】写入时带 `plugin` 字段（默认 peel_data），
+        让全局历史页可按插件筛选；不破坏旧数据的展示。
+        """
         if not history:
             return
         try:
@@ -400,11 +403,20 @@ class PeelDataExtractor:
             for h in history:
                 db.execute(
                     f'INSERT OR IGNORE INTO "{table_name}" '
-                    '("file_path", "file_name", "success", "reason", "request_id", "operation_time") '
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (h.file_path, h.file_name, 1 if h.success else 0, h.reason, request_id, h.operation_time),
+                    '("file_path", "file_name", "success", "reason", "request_id", "plugin", "operation_time") '
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        h.file_path,
+                        h.file_name,
+                        1 if h.success else 0,
+                        h.reason,
+                        request_id,
+                        # 显式写明插件名（peel_data），由调用方负责在后续多插件场景中替换
+                        "peel_data",
+                        h.operation_time,
+                    ),
                 )
-            logger.info(f"历史记录已持久化: {len(history)} 条")
+            logger.info(f"历史记录已持久化: {len(history)} 条 (plugin=peel_data)")
         except Exception as e:
             logger.error(f"历史记录持久化失败: {e}", exc_info=True)
 
