@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
     # 特殊页面标识（非插件）
     PAGE_WORKBENCH = "__workbench__"
     PAGE_MODULES = "__modules__"
+    PAGE_HISTORY = "__history__"
     PAGE_VERSION = "__version__"
     PAGE_SETTINGS = "__settings__"
 
@@ -258,9 +259,19 @@ class MainWindow(QMainWindow):
             self._switch_builtin(self.PAGE_WORKBENCH)
 
     def _add_builtin_pages(self):
-        """添加内建页面（版本动态等）到侧边栏"""
+        """添加内建页面（历史 / 版本动态 / 综合设置）到侧边栏"""
         from plugins.peel_data.ui.version_history import VersionPageWidget
         from plugins.peel_data.plugin import PeelDataPlugin
+        from ui.history_page import HistoryPage
+        from ui.settings_page import SettingsPage
+
+        # 全局历史页面（v1.7.3：内建一级页面）
+        self._history_page = HistoryPage(parent=self)
+        self._stack.addWidget(self._history_page)
+        btn_history = SidebarButton(self.PAGE_HISTORY, "  🕘 历史")
+        btn_history.clicked.connect(lambda: self._switch_builtin(self.PAGE_HISTORY))
+        self._nav_buttons[self.PAGE_HISTORY] = btn_history
+        self._builtin_nav_container.addWidget(btn_history)
 
         # 版本动态页面
         plugin = PeelDataPlugin()
@@ -268,16 +279,19 @@ class MainWindow(QMainWindow):
             current_version=plugin.version, parent=self
         )
         self._stack.addWidget(self._version_page)
+        self._version_page.setObjectName("version_page")
 
         btn_version = SidebarButton(self.PAGE_VERSION, "  版本动态")
         btn_version.clicked.connect(lambda: self._switch_builtin(self.PAGE_VERSION))
         self._nav_buttons[self.PAGE_VERSION] = btn_version
         self._builtin_nav_container.addWidget(btn_version)
 
-        # 综合设置（弹出对话框，非嵌入页面）
+        # 综合设置（v1.7.3：迁移为一级页面，不再弹窗）
+        self._settings_page = SettingsPage(parent=self)
+        self._stack.addWidget(self._settings_page)
         btn_settings = SidebarButton(self.PAGE_SETTINGS, "  ⚙ 综合设置")
-        btn_settings.setCheckable(False)
-        btn_settings.clicked.connect(self._open_settings)
+        btn_settings.clicked.connect(lambda: self._switch_builtin(self.PAGE_SETTINGS))
+        self._nav_buttons[self.PAGE_SETTINGS] = btn_settings
         self._builtin_nav_container.addWidget(btn_settings)
 
     def _switch_plugin(self, name: str):
@@ -321,6 +335,17 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self._stack.setCurrentIndex(idx)
             self._status_bar.showMessage("功能块中心")
+        elif page_id == self.PAGE_HISTORY and self._history_page:
+            idx = self._stack.indexOf(self._history_page)
+            if idx >= 0:
+                self._stack.setCurrentIndex(idx)
+            self._history_page.refresh()
+            self._status_bar.showMessage("全局历史")
+        elif page_id == self.PAGE_SETTINGS and self._settings_page:
+            idx = self._stack.indexOf(self._settings_page)
+            if idx >= 0:
+                self._stack.setCurrentIndex(idx)
+            self._status_bar.showMessage("综合设置")
         elif page_id == self.PAGE_VERSION:
             idx = self._stack.indexOf(self._version_page)
             if idx >= 0:
@@ -332,10 +357,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(LIGHT_STYLE)
 
     def _open_settings(self):
-        """打开综合设置对话框"""
-        from ui.settings_dialog import SettingsDialog
-        dialog = SettingsDialog(self)
-        dialog.exec()
+        """综合设置兜底入口（保留弹窗模式，用于调试 / 兼容旧调用）。"""
+        from ui.settings_page import open_as_dialog
+        open_as_dialog(self)
 
     def set_status(self, message: str):
         """设置状态栏消息"""
