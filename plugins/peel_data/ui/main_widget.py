@@ -2344,33 +2344,41 @@ class PeelDataWidget(QWidget):
         main_layout.setContentsMargins(4, 4, 4, 4)
         main_layout.setSpacing(10)
 
-        # === 标题栏：数据提取 + 操作按钮 ===
+        # === 标题栏：一句话价值 + 操作按钮 ===
         title_layout = QHBoxLayout()
         title_layout.setContentsMargins(8, 6, 8, 0)
-        title_label = QLabel("数据提取")
+        title_label = QLabel("快速汇总剥离数据")
         title_font = QFont()
         title_font.setBold(True)
-        title_font.setPointSize(12)
+        title_font.setPointSize(14)
         title_label.setFont(title_font)
         title_layout.addWidget(title_label)
+
+        subtitle = QLabel("选文件夹，一键提取 PDF/Excel 里的剥离强度数据。")
+        subtitle.setObjectName("status_label")
+        title_layout.addWidget(subtitle)
         title_layout.addStretch()
 
         # 历史记录按钮
-        self._btn_history = QPushButton("历史记录")
+        self._btn_history = QPushButton("最近提取")
         self._btn_history.setEnabled(False)
         self._btn_history.setMinimumWidth(90)
         self._btn_history.setObjectName("btn_secondary")
         title_layout.addWidget(self._btn_history)
 
         # 查看数据库按钮
-        self._btn_view_db = QPushButton("查看数据库")
-        self._btn_view_db.setMinimumWidth(90)
+        self._btn_view_db = QPushButton("查看已保存数据")
+        self._btn_view_db.setMinimumWidth(120)
         self._btn_view_db.setObjectName("btn_secondary")
         title_layout.addWidget(self._btn_view_db)
 
         main_layout.addLayout(title_layout)
 
-        # === 顶部操作区 ===
+        guide = QLabel("① 选择数据文件夹   →   ② 点击开始提取   →   ③ 检查结果并导出")
+        guide.setObjectName("onboarding_hint")
+        guide.setWordWrap(True)
+        main_layout.addWidget(guide)
+
         top_group = QGroupBox()
         top_group.setObjectName("flat_group")
         top_layout = QGridLayout(top_group)
@@ -2378,12 +2386,12 @@ class PeelDataWidget(QWidget):
         top_layout.setContentsMargins(12, 16, 12, 12)
 
         # 目录选择行
-        top_layout.addWidget(QLabel("数据目录："), 0, 0)
+        top_layout.addWidget(QLabel("文件夹："), 0, 0)
         self._dir_edit = QLineEdit(config.last_data_dir)
-        self._dir_edit.setPlaceholderText("首次使用请点击「选择目录」指定数据文件夹")
+        self._dir_edit.setPlaceholderText("选择包含 PDF/Excel 的文件夹")
         top_layout.addWidget(self._dir_edit, 0, 1)
 
-        self._btn_browse = QPushButton("选择目录")
+        self._btn_browse = QPushButton("选择文件夹")
         self._btn_browse.setObjectName("btn_warning")
         self._btn_browse.setMinimumWidth(90)
         top_layout.addWidget(self._btn_browse, 0, 2)
@@ -2392,9 +2400,9 @@ class PeelDataWidget(QWidget):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
 
-        self._btn_extract = QPushButton("开始提取")
+        self._btn_extract = QPushButton("开始提取并预览")
         self._btn_extract.setObjectName("btn_success")
-        self._btn_extract.setMinimumWidth(90)
+        self._btn_extract.setMinimumWidth(130)
         btn_layout.addWidget(self._btn_extract)
 
         self._btn_cancel = QPushButton("取消")
@@ -2403,7 +2411,7 @@ class PeelDataWidget(QWidget):
         self._btn_cancel.setMinimumWidth(70)
         btn_layout.addWidget(self._btn_cancel)
 
-        self._chk_save_db = QCheckBox("保存到数据库")
+        self._chk_save_db = QCheckBox("提取后保存结果")
         self._chk_save_db.setChecked(True)
         btn_layout.addWidget(self._chk_save_db)
 
@@ -2416,7 +2424,7 @@ class PeelDataWidget(QWidget):
         top_layout.addWidget(self._progress_bar, 2, 0, 1, 3)
 
         # 状态标签
-        self._status_label = QLabel("就绪")
+        self._status_label = QLabel("先选择文件夹，再开始提取。")
         self._status_label.setObjectName("status_label")
         top_layout.addWidget(self._status_label, 3, 0, 1, 3)
 
@@ -2426,12 +2434,12 @@ class PeelDataWidget(QWidget):
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         # 数据预览表格
-        table_group = QGroupBox("数据预览")
+        table_group = QGroupBox("提取结果")
         table_layout = QVBoxLayout(table_group)
         table_layout.setSpacing(6)
 
         # 编辑提示
-        edit_hint = QLabel('双击单元格可编辑，修改后点击「保存修改」同步到数据库')
+        edit_hint = QLabel('首次使用：先选择文件夹，提取完成后可双击表格修正数据，再点击「保存修改」。')
         edit_hint.setObjectName("status_label")
         table_layout.addWidget(edit_hint)
 

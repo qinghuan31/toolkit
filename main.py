@@ -46,9 +46,9 @@ def main():
     )
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Toolkit")
-    app.setApplicationVersion("1.0.0")
-    app.setOrganizationName("WorkBuddy")
+    app.setApplicationName(_config.config.app_name)
+    app.setApplicationVersion(_config.get_version())
+    app.setOrganizationName(_config.config.organization)
 
     # 设置应用图标（优先 .ico，回退 .png）
     icon_path_ico = os.path.join(PROJECT_ROOT, "resources", "app_icon.ico")
@@ -62,6 +62,18 @@ def main():
     if sys.platform == "win32":
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DNTL.Toolkit")
+
+    # 首次使用：先选择运行模式，减少进入主界面后的配置阻碍
+    if not _config.config.onboarding_completed:
+        try:
+            from ui.onboarding_dialog import OnboardingDialog
+            onboarding = OnboardingDialog(_config.config.db.network_mode)
+            if onboarding.exec() == OnboardingDialog.DialogCode.Accepted:
+                _config.config.db.network_mode = onboarding.selected_mode
+                _config.config.onboarding_completed = True
+                _config.config.save()
+        except Exception as e:
+            print(f"[Onboarding] startup failed: {e}")
 
     window = MainWindow()
     window.show()

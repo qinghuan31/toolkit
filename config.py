@@ -59,7 +59,7 @@ class AppConfig:
     app_name: str = "Toolkit"
     # 【v1.5.1 单一来源】全项目版本号统一从此处读取
     # 不再在 plugin.py / main_window.py / toolkit.spec / release.yml 硬编码
-    app_version: str = "1.7.1"
+    app_version: str = "1.7.2"
     organization: str = "WorkBuddy"
 
     # GitHub 仓库信息 —— 用于自动更新检查
@@ -67,6 +67,9 @@ class AppConfig:
     github_repo: str = "toolkit"
     # 代理前缀 —— 国内加速 GitHub 下载(可改可禁)
     github_proxy: str = "https://gh-proxy.org/"
+
+    # 首次使用引导
+    onboarding_completed: bool = False
 
     # 数据目录（动态持久化：首次为空，用户选择后自动保存，下次启动自动回填）
     last_data_dir: str = ""
@@ -163,6 +166,7 @@ class AppConfig:
     def export_settings(self) -> dict:
         """导出全部配置为字典（供 save / 导出功能使用）"""
         return {
+            "onboarding_completed": self.onboarding_completed,
             "last_data_dir": self.last_data_dir,
             "db": {
                 "database_path": self.db.database_path,
@@ -183,6 +187,7 @@ class AppConfig:
         """从字典导入配置（兼容缺失字段，不会因缺少某个 key 而崩溃）"""
         if not isinstance(data, dict):
             return
+        self.onboarding_completed = bool(data.get("onboarding_completed", self.onboarding_completed))
         self.last_data_dir = data.get("last_data_dir", self.last_data_dir)
         # 数据库配置
         db_data = data.get("db", {})

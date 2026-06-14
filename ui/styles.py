@@ -51,11 +51,24 @@ QLabel#hint_label[state="warning"] { color: #b45309; font-weight: 600; }
 QLabel#hint_label[state="success"] { color: #047857; font-weight: 600; }
 QLabel#hint_label[state="danger"]  { color: #b91c1c; font-weight: 600; }
 
-QLabel#section_label {
-    color: #374151;
+QLabel#onboarding_hint {
+    background-color: #eef2ff;
+    color: #3730a3;
+    border: 1px solid #c7d2fe;
+    border-radius: 8px;
+    padding: 10px 12px;
     font-size: 12px;
-    font-weight: 500;
-    margin-top: 6px;
+    font-weight: 600;
+}
+
+QLabel#main_guide {
+    background-color: #eff6ff;
+    color: #1d4ed8;
+    border: 1px solid #bfdbfe;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12px;
+    font-weight: 600;
 }
 
 /* ========== 分组框 ========== */
@@ -273,10 +286,10 @@ QMainWindow {
 
 /* ========== 侧边栏 ========== */
 #sidebar {
-    background-color: #1f2937;
+    background-color: #172033;
     border: none;
-    min-width: 200px;
-    max-width: 200px;
+    min-width: 204px;
+    max-width: 204px;
 }
 
 #sidebar QLabel {
@@ -313,6 +326,16 @@ QMainWindow {
 #content_area {
     background-color: #f5f6f7;
     border: none;
+}
+
+QLabel#onboarding_hint {
+    background-color: #eef2ff;
+    color: #3730a3;
+    border: 1px solid #c7d2fe;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12px;
+    font-weight: 600;
 }
 
 /* ========== 分组框 ========== */

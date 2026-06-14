@@ -24,13 +24,13 @@ class PeelDataPlugin(BasePlugin):
 
     @property
     def display_name(self) -> str:
-        return "剥离数据汇总"
+        return "数据提取"
 
     @property
     def description(self) -> str:
         return (
-            "从 PDF 和 Excel 文件中提取剥离强度数据，"
-            "自动识别正负极，汇总存储至数据库并支持导出"
+            "选择 PDF 或 Excel 文件夹，一键提取剥离强度数据，"
+            "自动识别正负极并保存为可导出的数据库记录"
         )
 
     @property
