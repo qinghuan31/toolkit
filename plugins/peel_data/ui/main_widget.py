@@ -25,6 +25,7 @@ from plugins.peel_data.extractor import PeelDataExtractor, ExtractionResult, Fil
 from plugins.peel_data.models import PeelDataRecord
 
 logger = get_logger("peel_data.ui")
+_SUMMARY_TABLE_NAME = PeelDataRecord.get_table_name()
 
 
 class PreviewDialog(QDialog):
@@ -1091,7 +1092,7 @@ class DatabaseViewerDialog(QDialog):
                 '"curve_4", "curve_5", "curve_6", '
                 '"curve_7", "curve_8", "curve_9", '
                 '"std_dev", "curve_unit", "source_file" '
-                'FROM "peel_data_summary" '
+                f'FROM "{_SUMMARY_TABLE_NAME}" '
                 'ORDER BY "created_at" DESC '
                 'LIMIT 5000'
             )
@@ -1562,7 +1563,7 @@ class DatabaseViewerDialog(QDialog):
                 '"curve_4", "curve_5", "curve_6", '
                 '"curve_7", "curve_8", "curve_9", '
                 '"std_dev", "curve_unit", "source_file" '
-                'FROM "peel_data_summary" '
+                f'FROM "{_SUMMARY_TABLE_NAME}" '
                 'ORDER BY "created_at" DESC '
                 'LIMIT 5000'
             )
@@ -1622,7 +1623,7 @@ class DatabaseViewerDialog(QDialog):
             db = DatabaseManager()
             for row_data in checked:
                 affected = db.execute(
-                    'DELETE FROM "peel_data_summary" '
+                    f'DELETE FROM "{_SUMMARY_TABLE_NAME}" '
                     'WHERE "sample_name"=? AND "test_date"=? AND "test_time"=?',
                     (row_data.get("sample_name", ""),
                      row_data.get("test_date", ""),
@@ -1669,7 +1670,7 @@ class DatabaseViewerDialog(QDialog):
             from core.database import DatabaseManager
             db = DatabaseManager()
             affected = db.execute(
-                'DELETE FROM "peel_data_summary" '
+                f'DELETE FROM "{_SUMMARY_TABLE_NAME}" '
                 'WHERE "sample_name"=? AND "test_date"=? AND "test_time"=?',
                 (sample_name, test_date, test_time),
             )
@@ -1926,7 +1927,7 @@ class DatabaseViewerDialog(QDialog):
             if key_changed:
                 # 主键变了：先删旧记录，再插入新记录
                 db.execute(
-                    'DELETE FROM "peel_data_summary" '
+                    f'DELETE FROM "{_SUMMARY_TABLE_NAME}" '
                     'WHERE "sample_name"=? AND "test_date"=? AND "test_time"=?',
                     (orig_sample_name, orig_test_date, orig_test_time),
                 )
@@ -1962,7 +1963,7 @@ class DatabaseViewerDialog(QDialog):
 
                 params.extend([orig_sample_name, orig_test_date, orig_test_time])
                 db.execute(
-                    f'UPDATE "peel_data_summary" SET {", ".join(set_parts)} '
+                    f'UPDATE "{_SUMMARY_TABLE_NAME}" SET {", ".join(set_parts)} '
                     'WHERE "sample_name"=? AND "test_date"=? AND "test_time"=?',
                     tuple(params),
                 )
@@ -1994,7 +1995,7 @@ class DatabaseViewerDialog(QDialog):
             db = DatabaseManager()
             for row_data in checked:
                 affected = db.execute(
-                    'DELETE FROM "peel_data_summary" '
+                    f'DELETE FROM "{_SUMMARY_TABLE_NAME}" '
                     'WHERE "sample_name"=? AND "test_date"=? AND "test_time"=?',
                     (row_data.get("sample_name", ""),
                      row_data.get("test_date", ""),
@@ -2240,7 +2241,7 @@ class DatabaseViewerDialog(QDialog):
 
                 # 去重检查：同一 (test_date, test_time, polarity) 视为同一测试
                 existing = db.query_one(
-                    'SELECT id, sample_name FROM "peel_data_summary" '
+                    f'SELECT id, sample_name FROM "{_SUMMARY_TABLE_NAME}" '
                     'WHERE "test_date"=? AND "test_time"=? AND "polarity"=?',
                     (test_date, test_time, polarity)
                 )
@@ -2907,7 +2908,7 @@ class PeelDataWidget(QWidget):
             for record in self._records:
                 # 先删除旧记录（按唯一约束匹配）
                 db.execute(
-                    'DELETE FROM "peel_data_summary" '
+                    f'DELETE FROM "{_SUMMARY_TABLE_NAME}" '
                     'WHERE "test_time"=? AND "test_date"=? AND "sample_name"=?',
                     (record.test_time, record.test_date, record.sample_name)
                 )
