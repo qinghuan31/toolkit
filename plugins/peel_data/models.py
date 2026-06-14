@@ -113,8 +113,9 @@ class PeelDataRecord:
 
     @staticmethod
     def get_create_table_ddl() -> str:
-        return """
-        CREATE TABLE IF NOT EXISTS "peel_data_summary" (
+        table_name = PeelDataRecord.get_table_name()
+        return f"""
+        CREATE TABLE IF NOT EXISTS "{table_name}" (
             "id"          INTEGER PRIMARY KEY AUTOINCREMENT,
             "sample_name" TEXT    NOT NULL,
             "sample_brand" TEXT    NOT NULL DEFAULT '',
