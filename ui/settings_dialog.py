@@ -98,10 +98,9 @@ class _NetworkTab(QWidget):
         server_layout.setContentsMargins(16, 20, 16, 16)
 
         # 监听地址：自动填本机局域网 IP
-        from socket import socket as _socket
         local_ip = "0.0.0.0"
         try:
-            s = _socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
@@ -328,9 +327,8 @@ class _NetworkTab(QWidget):
 
     def _on_detect_local_ip(self):
         """重新检测本机局域网 IP"""
-        from socket import socket as _socket
         try:
-            s = _socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             s.close()
