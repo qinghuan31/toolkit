@@ -31,7 +31,13 @@ logger = get_logger("db.server")
 
 # 白名单表(防止任意 SQL 注入)
 # 【v1.7.0】遵循"插件名_数据库名"命名规范
-ALLOWED_TABLES = {PeelDataRecord.get_table_name(), get_history_table_name()}
+# 【v1.8.0】增加 capacity_analysis 插件表
+ALLOWED_TABLES = {
+    PeelDataRecord.get_table_name(),
+    get_history_table_name(),
+    "capacity_analysis_distribution",
+    "capacity_analysis_extraction_history",
+}
 
 # 严格 WHERE 子句校验:只允许字母数字下划线点号比较运算符 and/or/in
 _SAFE_WHERE = re.compile(r"^[A-Za-z0-9_.\s<>=!\(\)\?,']+$")
