@@ -28,7 +28,7 @@ class CapacityAnalysisPlugin(BasePlugin):
         return (
             "导入精捷能分容柜导出的 Excel/CSV 数据，自动识别工艺工步，"
             "清洗分容容量（充电→放电→充电工艺），一键生成 JMP 风格的"
-            "直方图+箱体图+统计指标报告 PNG"
+            "可交互 HTML 报告（直方图+箱体图+统计指标+导出图片）"
         )
 
     @property

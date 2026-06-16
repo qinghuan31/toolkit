@@ -34,7 +34,7 @@ from plugins.capacity_analysis.models import (
     ensure_history_table,
     AnalysisResult,
 )
-from plugins.capacity_analysis.plotter import render_distribution_plot
+from plugins.capacity_analysis.report_html import render_distribution_html
 
 logger = get_logger("capacity_analysis.ui")
 
@@ -108,7 +108,7 @@ class CapacityAnalysisWidget(QWidget):
         title_box = QVBoxLayout()
         title = QLabel("分容数据统计分析")
         title.setObjectName("page_title")
-        subtitle = QLabel("选择精捷能分容柜导出的 Excel/CSV，一键生成 JMP 风格分布报告（直方图 + 箱体图 + 统计指标）。")
+        subtitle = QLabel("选择精捷能分容柜导出的 Excel/CSV，一键生成 JMP 风格交互报告（HTML 内置直方图间距调节 + 导出图片）。")
         subtitle.setObjectName("page_desc")
         subtitle.setWordWrap(True)
         title_box.addWidget(title)
@@ -197,7 +197,7 @@ class CapacityAnalysisWidget(QWidget):
 
         out_box.addStretch()
 
-        self._btn_plot = QPushButton("生成分布图 PNG")
+        self._btn_plot = QPushButton("生成交互报告 HTML")
         self._btn_plot.setObjectName("btn_success")
         self._btn_plot.clicked.connect(self._on_plot)
         self._btn_plot.setEnabled(False)
@@ -329,14 +329,20 @@ class CapacityAnalysisWidget(QWidget):
         if not out_dir:
             return
         ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = os.path.join(out_dir, f"{r.batch_id}_{ts}_distribution.png")
+        out_path = os.path.join(out_dir, f"{r.batch_id}_{ts}_distribution_report.html")
         try:
-            saved = render_distribution_plot(r, out_path)
+            saved = render_distribution_html(r, out_path)
             if saved:
-                self._log.appendPlainText(f"分布图已生成: {saved}")
-                QMessageBox.information(self, "完成", f"分布图已保存到:\n{saved}")
+                self._log.appendPlainText(f"交互报告已生成: {saved}")
+                QMessageBox.information(
+                    self,
+                    "完成",
+                    "交互报告已保存到:\n"
+                    f"{saved}\n\n"
+                    "打开 HTML 后可用滑块调节直方图柱间距，并点击“导出图片”保存 PNG。",
+                )
             else:
-                QMessageBox.critical(self, "失败", "分布图生成失败（matplotlib 未安装？）")
+                QMessageBox.critical(self, "失败", "交互报告生成失败（没有有效数据？）")
         except Exception as e:
-            logger.error(f"生成分布图失败: {e}", exc_info=True)
-            QMessageBox.critical(self, "失败", f"生成分布图失败: {e}")
+            logger.error(f"生成交互报告失败: {e}", exc_info=True)
+            QMessageBox.critical(self, "失败", f"生成交互报告失败: {e}")
