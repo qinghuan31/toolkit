@@ -3,16 +3,17 @@
 """
 backup.py - 项目备份脚本（双保险机制之一）
 
-使用方式（在项目根目录执行）：
+使用方式（可在任意目录执行）：
     python backup.py
     python backup.py --note "闪退修复前快照"
     python backup.py --keep 20  # 自定义保留份数
 
 行为：
-1. 复制整个项目到 E:\\工作目录\\backups\\<项目名>\\<时间戳>\\
-2. 排除 __pycache__/、.venv/、.git/、.workbuddy/、data/、logs/
-3. 只保留最近 N 份（默认 10），超出自动删旧
-4. 打印备份路径供 Z 验证
+1. 自动识别 backup.py 所在目录为项目根目录
+2. 复制整个项目到 E:\\工作目录\\backups\\<项目目录名>\\<时间戳>\\
+3. 排除 __pycache__/、.venv/、.git/、.workbuddy/、data/、logs/
+4. 只保留最近 N 份（默认 10），超出自动删旧
+5. 打印备份路径供 Z 验证
 """
 
 import argparse
@@ -24,8 +25,8 @@ from pathlib import Path
 
 
 # ============== 配置 ==============
-PROJECT_NAME = "toolkit重构版"  # 修改项目时同步改
 PROJECT_ROOT = Path(__file__).parent.resolve()
+PROJECT_NAME = PROJECT_ROOT.name
 BACKUP_BASE = Path("E:/工作目录/backups") / PROJECT_NAME
 KEEP_DEFAULT = 10
 
