@@ -1,31 +1,31 @@
-# -*- coding: utf-8 -*-
 name: Build and Release
 
 on:
   push:
     tags:
-      - 'v*'
-      - 'V*'
+      - "v*"
+      - "V*"
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: write   # 允许创建/上传 release
+      contents: write
     defaults:
       run:
         shell: pwsh
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # 需要 git tag 信息
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: "3.13"
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -55,11 +55,6 @@ jobs:
           }
           Write-Host "Build verified: $($exe.Name) ($([math]::Round($exe.Length / 1MB, 1)) MB)"
 
-      # ============================================================
-      # 关键修复:无论触发方式如何,都确保有一个 tag 可用
-      # - push tag:直接用 $GITHUB_REF
-      # - workflow_dispatch:创建一个 ci-build-<short-sha> 临时 tag
-      # ============================================================
       - name: Ensure release tag exists
         id: tag
         shell: bash
@@ -67,9 +62,8 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ]; then
             TAG="${GITHUB_REF#refs/tags/}"
             echo "Triggered by tag push, using: $TAG"
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           else
-            # workflow_dispatch:创建临时 tag
             SHORT_SHA="${GITHUB_SHA::7}"
             TAG="ci-build-$SHORT_SHA"
             echo "Triggered by dispatch, creating temp tag: $TAG"
@@ -77,32 +71,37 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git tag "$TAG" "$GITHUB_SHA"
             git push origin "$TAG"
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           fi
 
-      # ============================================================
-      # 固定 Release 正文模板：修复重点表 + 完整说明 + 下载 + 提交日志 + 升级说明
-      # 优先从 VERSION_LOG.md 解析；解析失败也必须输出同一套 Markdown 章节。
-      # ============================================================
       - name: Generate release body
         id: body
-        shell: pwsh
+        env:
+          VERSION_TAG: ${{ steps.tag.outputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           $ErrorActionPreference = "Stop"
-          $VERSION_LOG = "plugins/peel_data/VERSION_LOG.md"
-          $versionTag = "${{ steps.tag.outputs.tag }}"
+          $versionTag = $env:VERSION_TAG
           $versionNumber = $versionTag -replace '^[vV]', ''
-          $commitUrl = "https://github.com/${{ github.repository }}/commits/$versionTag"
-          $releaseParts = $versionNumber -split '\.'
+          $commitUrl = "https://github.com/$env:REPOSITORY/commits/$versionTag"
+          $versionLog = "plugins/peel_data/VERSION_LOG.md"
+
           $releaseType = "CI Build"
+          $releaseParts = $versionNumber -split '\.'
           if ($releaseParts.Count -ge 3) {
             $patch = 0
             $minor = 0
-            $major = 0
             [void][int]::TryParse($releaseParts[2], [ref]$patch)
             [void][int]::TryParse($releaseParts[1], [ref]$minor)
-            [void][int]::TryParse($releaseParts[0], [ref]$major)
-            $releaseType = if ($patch -gt 0) { "Patch Release" } elseif ($minor -gt 0) { "Minor Release" } else { "Major Release" }
+            if ($patch -gt 0) {
+              $releaseType = "Patch Release"
+            } elseif ($minor -gt 0) {
+              $releaseType = "Minor Release"
+            } else {
+              $releaseType = "Major Release"
+            }
           }
 
           function Escape-TableCell([string]$text) {
@@ -110,15 +109,15 @@ jobs:
             return ($text -replace '\|', '/' -replace "`r?`n", ' ').Trim()
           }
 
-          function Get-SectionItems($section, $heading) {
-            $m = [regex]::Match($section, "(?s)###\s*$heading\s*`n(.*?)(?=###|\z)")
-            if ($m.Success) {
-              return @($m.Groups[1].Value -split "`n" | Where-Object { $_ -match '^\s*-\s+' } | ForEach-Object { ($_ -replace '^\s*-\s*', '').Trim() })
+          function Get-SectionItems([string]$section, [string]$heading) {
+            $match = [regex]::Match($section, "(?s)###\s*$heading\s*`n(.*?)(?=###|\z)")
+            if ($match.Success) {
+              return @($match.Groups[1].Value -split "`n" | Where-Object { $_ -match '^\s*-\s+' } | ForEach-Object { ($_ -replace '^\s*-\s*', '').Trim() })
             }
             return @()
           }
 
-          function Add-TableRows($items, $severity, $range, [ref]$rows) {
+          function Add-TableRows($items, [string]$severity, [string]$range, [ref]$rows) {
             foreach ($item in $items) {
               $clean = $item -replace '\*\*(.+?)\*\*.*', '$1'
               if ($clean.Length -gt 60) { $clean = $clean.Substring(0, 57) + "..." }
@@ -132,20 +131,18 @@ jobs:
           $sourceNote = "未匹配到版本日志，使用当前提交自动生成 Release 说明。"
           $upgradeNotes = "- 关闭旧版 Toolkit 后再启动新版。`n- 建议升级前备份 data/app.db。`n- 单文件 exe 可覆盖旧文件，也可放到新目录直接运行。"
 
-          if (Test-Path $VERSION_LOG) {
-            $content = Get-Content $VERSION_LOG -Raw -Encoding utf8
-            Write-Host "Looking for version: [$versionNumber] in VERSION_LOG.md"
+          if (Test-Path $versionLog) {
+            $content = Get-Content $versionLog -Raw -Encoding utf8
             $pattern = "(?ms)##\s*\[$([regex]::Escape($versionNumber))\]\s*-\s*(\S+).*?(?=##\s*\[|\z)"
             $match = [regex]::Match($content, $pattern)
             if ($match.Success) {
               $section = $match.Value.Trim()
-              Write-Host "Parsed $($section.Length) chars for version [$versionNumber]"
               $features = Get-SectionItems $section "新增功能"
               $improvements = Get-SectionItems $section "功能改进"
               $fixes = Get-SectionItems $section "问题修复"
-              $sourceNote = "已从 `plugins/peel_data/VERSION_LOG.md` 自动解析版本 `$versionNumber`。"
+              $sourceNote = "已从 plugins/peel_data/VERSION_LOG.md 自动解析版本 $versionNumber。"
               if ($section -match "迁移|migrat|db.*→|rename") {
-                $upgradeNotes += "`n- 如存在旧 `toolkit.db`，启动后会自动迁移到 `app.db`。"
+                $upgradeNotes += "`n- 如存在旧 toolkit.db，启动后会自动迁移到 app.db。"
               }
             } else {
               Write-Warning "未在 VERSION_LOG.md 中找到版本 [$versionNumber]，使用固定模板兜底。"
@@ -165,55 +162,58 @@ jobs:
           $allItems = @($fixes + $improvements + $features)
           $detailItems = ""
           if ($allItems.Count -gt 0) {
-            $idx = 0
+            $index = 0
             foreach ($item in $allItems) {
-              $idx++
+              $index++
               $clean = $item.Trim()
               if ($clean.Length -gt 400) { $clean = $clean.Substring(0, 397) + "..." }
-              $detailItems += "### $idx. $clean`n`n"
+              $detailItems += "### $index. $clean`n`n"
               $detailItems += "- 来源：VERSION_LOG.md。`n"
               $detailItems += "- 影响：随本次 Release 一并发布。`n`n"
             }
           } else {
-            $detailItems = "### 1. CI 自动构建产物`n`n- 来源：当前提交 `$env:GITHUB_SHA`。`n- 影响：生成 Windows 单文件可执行程序。`n`n"
+            $detailItems = "### 1. CI 自动构建产物`n`n- 来源：当前提交 $env:COMMIT_SHA。`n- 影响：生成 Windows 单文件可执行程序。`n`n"
           }
 
-          $body = @"
-# Toolkit $versionTag ($releaseType) — 自动发布
+          $bodyLines = @(
+            "# Toolkit $versionTag ($releaseType) — 自动发布",
+            "",
+            "> 触发方式：$env:EVENT_NAME  ",
+            "> Commit：$env:COMMIT_SHA  ",
+            "> 说明来源：$sourceNote",
+            "",
+            "## 修复重点表",
+            "",
+            "| 严重度 | 修复项 | 影响范围 |",
+            "|--------|--------|----------|",
+            $fixTable.TrimEnd(),
+            "",
+            "## 完整说明",
+            "",
+            $detailItems.TrimEnd(),
+            "",
+            "## 下载",
+            "",
+            "- Toolkit_v*.exe：Windows 10/11 x64 单文件可执行程序，无需 Python 环境。",
+            "- 如 Release 页面出现多个资产，优先下载最新构建时间对应的 Toolkit_v*.exe。",
+            "- 若国内网络访问 GitHub 较慢，可使用应用内更新页提供的加速下载链接。",
+            "",
+            "## 提交日志",
+            "",
+            "- 完整提交日志：$commitUrl",
+            "- 构建 Commit：$env:COMMIT_SHA",
+            "- Release Tag：$versionTag",
+            "",
+            "## 升级说明",
+            "",
+            $upgradeNotes,
+            "",
+            "---",
+            "",
+            "此 Release 由 GitHub Actions 自动构建并发布。"
+          )
 
-> 触发方式：`${{ github.event_name }}`  
-> Commit：`${{ github.sha }}`  
-> 说明来源：$sourceNote
-
-## 修复重点表
-
-| 严重度 | 修复项 | 影响范围 |
-|--------|--------|----------|
-$fixTable
-## 完整说明
-
-$detailItems
-## 下载
-
-- `Toolkit_v*.exe`：Windows 10/11 x64 单文件可执行程序，无需 Python 环境。
-- 如 Release 页面出现多个资产，优先下载最新构建时间对应的 `Toolkit_v*.exe`。
-- 若国内网络访问 GitHub 较慢，可使用应用内更新页提供的加速下载链接。
-
-## 提交日志
-
-- 完整提交日志：$commitUrl
-- 构建 Commit：`${{ github.sha }}`
-- Release Tag：$versionTag
-
-## 升级说明
-
-$upgradeNotes
-
----
-
-此 Release 由 GitHub Actions 自动构建并发布。
-"@
-
+          $body = $bodyLines -join "`n"
           $body | Out-File -FilePath release_body.md -Encoding utf8
           Write-Host "Generated release body: $($body.Length) chars"
           Get-Content release_body.md | Select-Object -First 20
@@ -222,7 +222,7 @@ $upgradeNotes
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          name: "Toolkit ${{ steps.tag.outputs.tag }}"
+          name: Toolkit ${{ steps.tag.outputs.tag }}
           body_path: release_body.md
           draft: false
           prerelease: false
