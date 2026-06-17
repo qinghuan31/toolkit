@@ -75,12 +75,16 @@ def _t_critical_95(df: int) -> float:
     return 1.960
 
 
-def analyze(records: List[CapacityRecord]) -> CapacityStats:
+def analyze(records: List[CapacityRecord], min_cycle_count: int = 1, max_cycle_count: int = 1) -> CapacityStats:
     """计算 JMP 风格统计指标"""
     stats = CapacityStats()
-    if not records:
+    filtered_records = [
+        r for r in records
+        if min_cycle_count <= r.cycle_count <= max_cycle_count
+    ]
+    if not filtered_records:
         return stats
-    values = sorted([r.capacity_mah for r in records if r.capacity_mah > 0])
+    values = sorted([r.capacity_mah for r in filtered_records if r.capacity_mah > 0])
     n = len(values)
     if n == 0:
         return stats

@@ -94,22 +94,11 @@ def _build_payload(result: AnalysisResult) -> dict:
     }
 
 
-def render_distribution_html(result: AnalysisResult, output_path: str) -> str:
-    """生成自包含 HTML 报告并返回输出路径。"""
-    values = [float(r.capacity_mah) for r in result.records if r.capacity_mah > 0]
-    if not values:
-        logger.warning("没有有效数据，跳过 HTML 报告生成")
-        return ""
-
-    payload = _build_payload(result)
-    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    safe_title = html.escape(f"分容分布报告 - {result.batch_id}")
-
-    doc = """<!doctype html>
-<html lang=\"zh-CN\">
+_HTML_TEMPLATE = r"""<!doctype html>
+<html lang="zh-CN">
 <head>
-<meta charset=\"utf-8\">
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <style>
 :root {{
@@ -160,26 +149,26 @@ canvas {{ display: block; width: 360px; height: 470px; }}
 </style>
 </head>
 <body>
-<div class=\"toolbar\">
+<div class="toolbar">
   <label>直方图柱间距</label>
-  <input id=\"gapRange\" type=\"range\" min=\"0\" max=\"70\" step=\"1\" value=\"8\" aria-label=\"直方图柱间距\">
-  <input id=\"gapNumber\" type=\"number\" min=\"0\" max=\"70\" step=\"1\" value=\"8\">%
-  <button id=\"exportBtn\" type=\"button\">导出图片</button>
-  <span id=\"status\" class=\"status\">调整滑块可实时预览</span>
+  <input id="gapRange" type="range" min="0" max="70" step="1" value="8" aria-label="直方图柱间距">
+  <input id="gapNumber" type="number" min="0" max="70" step="1" value="8">%
+  <button id="exportBtn" type="button">导出图片</button>
+  <span id="status" class="status">调整滑块可实时预览</span>
 </div>
 
-<main class=\"report\" id=\"report\">
-  <div class=\"fold top\"><span class=\"disclosure\"></span><span>分布</span></div>
-  <div class=\"fold sub\"><span class=\"tri\"></span><span>容量</span></div>
-  <div class=\"canvas-wrap\"><canvas id=\"distCanvas\" width=\"572\" height=\"748\"></canvas></div>
+<main class="report" id="report">
+  <div class="fold top"><span class="disclosure"></span><span>分布</span></div>
+  <div class="fold sub"><span class="tri"></span><span>容量</span></div>
+  <div class="canvas-wrap"><canvas id="distCanvas" width="572" height="748"></canvas></div>
 
-  <div class=\"section-title\"><span class=\"tri\"></span><span>分位数</span></div>
-  <div class=\"tables quantile-grid\" id=\"quantileTable\"></div>
+  <div class="section-title"><span class="tri"></span><span>分位数</span></div>
+  <div class="tables quantile-grid" id="quantileTable"></div>
 
-  <div class=\"section-title\"><span class=\"tri\"></span><span>汇总统计量</span></div>
-  <div class=\"tables summary-grid\" id=\"summaryTable\"></div>
+  <div class="section-title"><span class="tri"></span><span>汇总统计量</span></div>
+  <div class="tables summary-grid" id="summaryTable"></div>
 
-  <div class=\"meta\" id=\"meta\"></div>
+  <div class="meta" id="meta"></div>
 </main>
 
 <script>
@@ -192,86 +181,74 @@ const gapNumber = document.getElementById('gapNumber');
 const statusEl = document.getElementById('status');
 const exportBtn = document.getElementById('exportBtn');
 
-function fmt(v, digits = 4) {{
+function fmt(v, digits) {{
+  if (digits === undefined) digits = 4;
   if (v === null || v === undefined || Number.isNaN(Number(v))) return '';
-  let text = Number(v).toFixed(digits);
-  while (text.includes('.') && text.endsWith('0')) text = text.slice(0, -1);
-  if (text.endsWith('.')) text = text.slice(0, -1);
+  var text = Number(v).toFixed(digits);
+  while (text.indexOf('.') !== -1 && text.charAt(text.length - 1) === '0') text = text.slice(0, -1);
+  if (text.charAt(text.length - 1) === '.') text = text.slice(0, -1);
   return text;
 }}
 
-function histogram(values, binCount) {{
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  if (min === max) return {{ counts: [values.length], edges: [min, max + 1] }};
-  const width = (max - min) / binCount;
-  const counts = new Array(binCount).fill(0);
-  for (const v of values) {{
-    let idx = Math.floor((v - min) / width);
-    if (idx < 0) idx = 0;
-    if (idx >= binCount) idx = binCount - 1;
-    counts[idx]++;
+function niceTicks(min, max, maxTicks) {{
+  if (maxTicks === undefined) maxTicks = 8;
+  var span = Math.max(1e-9, max - min);
+  var rawStep = span / Math.max(1, maxTicks - 1);
+  var pow = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  var candidates = [1, 2, 5, 10].map(function (x) {{ return x * pow; }});
+  var step = candidates[candidates.length - 1];
+  for (var i = 0; i < candidates.length; i++) {{
+    if (rawStep <= candidates[i]) {{ step = candidates[i]; break; }}
   }}
-  const edges = Array.from({{ length: binCount + 1 }}, (_, i) => min + i * width);
-  return {{ counts, edges }};
-}}
-
-function niceTicks(min, max, maxTicks = 8) {{
-  const span = Math.max(1e-9, max - min);
-  const rawStep = span / Math.max(1, maxTicks - 1);
-  const pow = Math.pow(10, Math.floor(Math.log10(rawStep)));
-  const candidates = [1, 2, 5, 10].map(x => x * pow);
-  let step = candidates[candidates.length - 1];
-  for (const c of candidates) {{ if (rawStep <= c) {{ step = c; break; }} }}
-  const start = Math.ceil(min / step) * step;
-  const ticks = [];
-  for (let t = start; t <= max + step * 0.5; t += step) ticks.push(t);
+  var start = Math.ceil(min / step) * step;
+  var ticks = [];
+  for (var t = start; t <= max + step * 0.5; t += step) ticks.push(t);
   return ticks;
 }}
 
 function draw(gapPct) {{
-  const values = DATA.values;
-  const stats = DATA.stats;
-  const W = canvas.width, H = canvas.height;
+  var values = DATA.values;
+  var stats = DATA.stats;
+  var W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, W, H);
 
-  const top = 8, bottom = 30;
-  const left = 56;
-  const mainRight = 484;
-  const boxLeft = 484, boxRight = 560;
-  const plotH = H - top - bottom;
-  const yMin0 = Math.min(...values), yMax0 = Math.max(...values);
-  const span0 = yMax0 - yMin0;
-  const pad = Math.max(2, span0 * 0.04);
-  const yMin = yMin0 - pad, yMax = yMax0 + pad;
-  const y = v => top + (yMax - v) / (yMax - yMin) * plotH;
+  var top = 8, bottom = 30;
+  var left = 56;
+  var boxLeft = 484, boxRight = 560;
+  var plotH = H - top - bottom;
+  var yMin0 = Math.min.apply(null, values), yMax0 = Math.max.apply(null, values);
+  var span0 = yMax0 - yMin0;
+  var pad = Math.max(2, span0 * 0.04);
+  var yMin = yMin0 - pad, yMax = yMax0 + pad;
+  var y = function (v) {{ return top + (yMax - v) / (yMax - yMin) * plotH; }};
 
-  const span = yMax - yMin;
-  const fd = span / Math.max(8, Math.cbrt(values.length) * 2);
-  let binW = Math.max(span / 24, fd);
-  const mag = Math.pow(10, Math.floor(Math.log10(binW)));
-  const norm = binW / mag;
-  let step;
+  var span = yMax - yMin;
+  var fd = span / Math.max(8, Math.pow(values.length, 1 / 3) * 2);
+  var binW = Math.max(span / 24, fd);
+  var mag = Math.pow(10, Math.floor(Math.log10(binW)));
+  var norm = binW / mag;
+  var step;
   if (norm < 1.5) step = 1 * mag;
   else if (norm < 3) step = 2 * mag;
   else if (norm < 7) step = 5 * mag;
   else step = 10 * mag;
   binW = step;
-  const binCount = Math.max(10, Math.min(28, Math.ceil(span / binW)));
-  const firstEdge = Math.floor(yMin / binW) * binW;
-  const lastEdge = Math.ceil(yMax / binW) * binW;
-  const edges = [];
-  for (let e = firstEdge; e <= lastEdge + 1e-9; e += binW) edges.push(e);
-  const counts = new Array(edges.length - 1).fill(0);
-  for (const v of values) {{
-    let idx = Math.floor((v - edges[0]) / binW);
+  var binCount = Math.max(10, Math.min(28, Math.ceil(span / binW)));
+  var firstEdge = Math.floor(yMin / binW) * binW;
+  var lastEdge = Math.ceil(yMax / binW) * binW;
+  var edges = [];
+  for (var e = firstEdge; e <= lastEdge + 1e-9; e += binW) edges.push(e);
+  var counts = new Array(edges.length - 1).fill(0);
+  for (var vi = 0; vi < values.length; vi++) {{
+    var v = values[vi];
+    var idx = Math.floor((v - edges[0]) / binW);
     if (idx < 0) idx = 0;
     if (idx >= counts.length) idx = counts.length - 1;
     counts[idx]++;
   }}
-  const maxCount = Math.max(...counts, 1);
+  var maxCount = Math.max.apply(null, counts.concat([1]));
 
   ctx.strokeStyle = '#111';
   ctx.lineWidth = 1.5;
@@ -281,45 +258,48 @@ function draw(gapPct) {{
   ctx.lineTo(boxLeft, top + plotH);
   ctx.stroke();
 
-  const yTicks = niceTicks(yMin, yMax, 8);
-  ctx.font = '20px Arial, Microsoft YaHei, sans-serif';
+  var yTicks = niceTicks(yMin, yMax, 8);
+  ctx.font = '20px Arial, "Microsoft YaHei", sans-serif';
   ctx.fillStyle = '#222';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  for (const t of yTicks) {{
-    const yy = y(t);
+  for (var yi = 0; yi < yTicks.length; yi++) {{
+    var t = yTicks[yi];
+    var yy = y(t);
     ctx.strokeStyle = '#222'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(left - 6, yy); ctx.lineTo(left, yy); ctx.stroke();
     ctx.fillText(fmt(t, 0), left - 9, yy);
   }}
 
-  const xTicks = niceTicks(0, maxCount, 7);
+  var xTicks = niceTicks(0, maxCount, 7);
   ctx.strokeStyle = '#cfcfcf';
   ctx.lineWidth = 1;
   ctx.setLineDash([2, 3]);
-  for (const t of xTicks) {{
-    const x = left + t / maxCount * (boxLeft - left);
+  for (var xi = 0; xi < xTicks.length; xi++) {{
+    var xt = xTicks[xi];
+    var x = left + xt / maxCount * (boxLeft - left);
     ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + plotH); ctx.stroke();
   }}
   ctx.setLineDash([]);
-  ctx.font = '20px Arial, Microsoft YaHei, sans-serif';
+  ctx.font = '20px Arial, "Microsoft YaHei", sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  for (const t of xTicks) {{
-    const x = left + t / maxCount * (boxLeft - left);
-    ctx.fillText(String(Math.round(t)), x, top + plotH + 8);
+  for (var xi2 = 0; xi2 < xTicks.length; xi2++) {{
+    var xt2 = xTicks[xi2];
+    var x2 = left + xt2 / maxCount * (boxLeft - left);
+    ctx.fillText(String(Math.round(xt2)), x2, top + plotH + 8);
   }}
 
-  const gapRatio = Math.max(0, Math.min(0.85, gapPct / 100));
-  for (let i = 0; i < counts.length; i++) {{
-    const y1 = y(edges[i]);
-    const y2 = y(edges[i + 1]);
-    const bandTop = Math.min(y1, y2);
-    const bandH = Math.abs(y2 - y1);
-    const barH = Math.max(1, bandH * (1 - gapRatio));
-    const barY = bandTop + (bandH - barH) / 2;
-    const xEnd = left + counts[i] / maxCount * (boxLeft - left);
-    const barW = Math.max(0, xEnd - left);
+  var gapRatio = Math.max(0, Math.min(0.85, gapPct / 100));
+  for (var i = 0; i < counts.length; i++) {{
+    var y1 = y(edges[i]);
+    var y2 = y(edges[i + 1]);
+    var bandTop = Math.min(y1, y2);
+    var bandH = Math.abs(y2 - y1);
+    var barH = Math.max(1, bandH * (1 - gapRatio));
+    var barY = bandTop + (bandH - barH) / 2;
+    var xEnd = left + counts[i] / maxCount * (boxLeft - left);
+    var barW = Math.max(0, xEnd - left);
     ctx.fillStyle = 'rgba(168, 198, 152, 0.95)';
     ctx.strokeStyle = '#5d765d';
     ctx.lineWidth = 1;
@@ -329,20 +309,20 @@ function draw(gapPct) {{
     }}
   }}
 
-  drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, left, mainRight);
+  drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, left);
 }}
 
-function drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, mainLeft, mainRight) {{
-  const cx = (boxLeft + boxRight) / 2;
-  const boxW = 28;
-  const q1 = stats.q1, q3 = stats.q3, med = stats.median;
-  const iqr = q3 - q1;
-  const lowerFence = q1 - 1.5 * iqr;
-  const upperFence = q3 + 1.5 * iqr;
-  const nonOut = values.filter(v => v >= lowerFence && v <= upperFence);
-  const out = values.filter(v => v < lowerFence || v > upperFence);
-  const lo = nonOut.length ? Math.min(...nonOut) : q1;
-  const hi = nonOut.length ? Math.max(...nonOut) : q3;
+function drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, mainLeft) {{
+  var cx = (boxLeft + boxRight) / 2;
+  var boxW = 28;
+  var q1 = stats.q1, q3 = stats.q3, med = stats.median;
+  var iqr = q3 - q1;
+  var lowerFence = q1 - 1.5 * iqr;
+  var upperFence = q3 + 1.5 * iqr;
+  var nonOut = values.filter(function (v) {{ return v >= lowerFence && v <= upperFence; }});
+  var out = values.filter(function (v) {{ return v < lowerFence || v > upperFence; }});
+  var lo = nonOut.length ? Math.min.apply(null, nonOut) : q1;
+  var hi = nonOut.length ? Math.max.apply(null, nonOut) : q3;
 
   ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.moveTo(cx, y(q3)); ctx.lineTo(cx, y(hi)); ctx.stroke();
@@ -351,7 +331,7 @@ function drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, mainLeft, 
   ctx.beginPath(); ctx.moveTo(cx - 12, y(lo)); ctx.lineTo(cx + 12, y(lo)); ctx.stroke();
 
   ctx.fillStyle = '#fff'; ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
-  const boxY = y(q3), boxH = Math.max(4, y(q1) - y(q3));
+  var boxY = y(q3), boxH = Math.max(4, y(q1) - y(q3));
   ctx.fillRect(cx - boxW / 2, boxY, boxW, boxH);
   ctx.strokeRect(cx - boxW / 2, boxY, boxW, boxH);
   ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
@@ -366,13 +346,13 @@ function drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, mainLeft, 
   ctx.stroke();
 
   ctx.fillStyle = '#000';
-  for (const v of out) {{
-    const yy = y(v);
+  for (var oi = 0; oi < out.length; oi++) {{
+    var yy = y(out[oi]);
     ctx.beginPath(); ctx.arc(cx, yy, 3, 0, Math.PI * 2); ctx.fill();
   }}
 
   ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
-  const my = y(stats.mean);
+  var my = y(stats.mean);
   ctx.beginPath();
   ctx.moveTo(cx, my - 9);
   ctx.lineTo(cx + 8, my);
@@ -389,55 +369,59 @@ function drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, mainLeft, 
 }}
 
 function buildTables() {{
-  const q = document.getElementById('quantileTable');
+  var q = document.getElementById('quantileTable');
   q.innerHTML = '';
-  for (const row of DATA.quantiles) {{
-    const pct = document.createElement('div'); pct.className = 'pct'; pct.textContent = row.pct;
-    const value = document.createElement('div'); value.className = 'value'; value.textContent = fmt(row.value, 3);
-    const label = document.createElement('div'); label.className = 'label'; label.textContent = row.label || '';
-    const right = document.createElement('div'); right.className = 'right-value'; right.textContent = row.label ? fmt(row.value, 3) : '';
+  for (var i = 0; i < DATA.quantiles.length; i++) {{
+    var row = DATA.quantiles[i];
+    var pct = document.createElement('div'); pct.className = 'pct'; pct.textContent = row.pct;
+    var value = document.createElement('div'); value.className = 'value'; value.textContent = fmt(row.value, 3);
+    var label = document.createElement('div'); label.className = 'label'; label.textContent = row.label || '';
+    var right = document.createElement('div'); right.className = 'right-value'; right.textContent = row.label ? fmt(row.value, 3) : '';
     q.append(pct, value, label, right);
   }}
-  const s = DATA.stats;
-  const rows = [
+  var s = DATA.stats;
+  var rows = [
     ['均值', s.mean], ['标准差', s.stdDev], ['均值标准误差', s.stdErr],
     ['均值 95% 上限', s.ci95Upper], ['均值 95% 下限', s.ci95Lower], ['数目', s.count]
   ];
-  const summary = document.getElementById('summaryTable');
+  var summary = document.getElementById('summaryTable');
   summary.innerHTML = '';
-  for (const [name, val] of rows) {{
-    const n = document.createElement('div'); n.className = 'name'; n.textContent = name;
-    const v = document.createElement('div'); v.className = 'val'; v.textContent = name === '数目' ? String(val) : fmt(val, 6);
+  for (var ri = 0; ri < rows.length; ri++) {{
+    var name = rows[ri][0];
+    var val = rows[ri][1];
+    var n = document.createElement('div'); n.className = 'name'; n.textContent = name;
+    var v = document.createElement('div'); v.className = 'val'; v.textContent = name === '数目' ? String(val) : fmt(val, 6);
     summary.append(n, v);
   }}
-  const abnormalText = Object.entries(DATA.abnormal).map(function (kv) { return kv[0] + ':' + kv[1]; }).join('，') || '无';
-  const groups = Object.entries(DATA.cycleGroups).map(function (kv) { return kv[0] + '次分容 ' + kv[1] + '块'; }).join('，') || '无';
-  document.getElementById('meta').textContent = `批次：${DATA.batchId}｜样本：${s.count}｜分容次数：${groups}｜剔除异常：${abnormalText}｜生成：${DATA.generatedAt}`;
+  var abnormalText = Object.keys(DATA.abnormal).map(function (k) {{ return k + ':' + DATA.abnormal[k]; }}).join('，') || '无';
+  var groups = Object.keys(DATA.cycleGroups).map(function (k) {{ return k + '次分容 ' + DATA.cycleGroups[k] + '块'; }}).join('，') || '无';
+  document.getElementById('meta').textContent = '批次：' + DATA.batchId + '｜样本：' + s.count + '｜分容次数：' + groups + '｜剔除异常：' + abnormalText + '｜生成：' + DATA.generatedAt;
 }}
 
 function syncGap(value) {{
-  const v = Math.max(0, Math.min(70, Number(value) || 0));
+  var v = Math.max(0, Math.min(70, Number(value) || 0));
   gapRange.value = v; gapNumber.value = v;
   draw(v);
-  statusEl.textContent = `当前柱间距：${v}%`;
+  statusEl.textContent = '当前柱间距：' + v + '%';
 }}
 
-gapRange.addEventListener('input', e => syncGap(e.target.value));
-gapNumber.addEventListener('input', e => syncGap(e.target.value));
-exportBtn.addEventListener('click', () => {{
+gapRange.addEventListener('input', function (e) {{ syncGap(e.target.value); }});
+gapNumber.addEventListener('input', function (e) {{ syncGap(e.target.value); }});
+exportBtn.addEventListener('click', function () {{
   statusEl.textContent = '正在导出图片...';
-  canvas.toBlob(blob => {{
+  canvas.toBlob(function (blob) {{
     if (!blob) {{ statusEl.textContent = '导出失败：浏览器未生成图片'; return; }}
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
     link.href = url;
-    let safeName = String(DATA.batchId || 'capacity_distribution');
-    for (const ch of ['\\\\', '/', ':', '*', '?', '"', '<', '>', '|']) safeName = safeName.split(ch).join('_');
+    var safeName = String(DATA.batchId || 'capacity_distribution');
+    var badChars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+    for (var ci = 0; ci < badChars.length; ci++) safeName = safeName.split(badChars[ci]).join('_');
     link.download = safeName + '.png';
     link.style.display = 'none';
     document.body.appendChild(link);
     link.click();
-    setTimeout(() => {{
+    setTimeout(function () {{
       URL.revokeObjectURL(url);
       link.remove();
       statusEl.textContent = '图片已导出，临时下载对象已清理';
@@ -451,7 +435,20 @@ syncGap(8);
 </body>
 </html>
 """
-    doc = doc.replace("{title}", safe_title)
+
+
+def render_distribution_html(result: AnalysisResult, output_path: str) -> str:
+    """生成自包含 HTML 报告并返回输出路径。"""
+    values = [float(r.capacity_mah) for r in result.records if r.capacity_mah > 0]
+    if not values:
+        logger.warning("没有有效数据，跳过 HTML 报告生成")
+        return ""
+
+    payload = _build_payload(result)
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    safe_title = html.escape(f"分容分布报告 - {result.batch_id}")
+
+    doc = _HTML_TEMPLATE.replace("{title}", safe_title).replace("{payload_json}", payload_json)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(doc)
