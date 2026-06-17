@@ -141,6 +141,8 @@ body { padding: 4px 6px 12px; }
 .fold { display: flex; align-items: center; gap: 3px; height: 20px; background: var(--panel-gray); border: 1px solid var(--panel-border); font-weight: 700; line-height: 20px; padding: 0 4px; }
 .fold.top { width: 286px; margin-left: 0; font-size: 16px; }
 .fold.sub { width: 240px; margin-left: 18px; font-size: 15px; margin-top: 2px; }
+.editable-title { min-width: 24px; outline: none; border-radius: 2px; padding: 0 2px; }
+.editable-title:focus { background: #fff; box-shadow: inset 0 0 0 1px #6d8fd6; }
 .tri { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid var(--red); margin-left: 2px; }
 .disclosure { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 8px solid #777; margin-left: 1px; }
 .canvas-wrap { margin-left: 30px; margin-top: 4px; width: 236px; }
@@ -180,8 +182,8 @@ canvas { display: block; width: 236px; height: 300px; }
 </div>
 
 <main class="report" id="report">
-  <div class="fold top"><span class="disclosure"></span><span>分布</span></div>
-  <div class="fold sub"><span class="tri"></span><span>容量</span></div>
+  <div class="fold top"><span class="disclosure"></span><span id="distributionTitle" class="editable-title" contenteditable="true" spellcheck="false">分布</span></div>
+  <div class="fold sub"><span class="tri"></span><span id="capacityTitle" class="editable-title" contenteditable="true" spellcheck="false">容量</span></div>
   <div class="canvas-wrap"><canvas id="distCanvas" width="354" height="450"></canvas></div>
 
   <div class="section-title"><span class="tri"></span><span>分位数</span></div>
@@ -207,6 +209,9 @@ const yStepInput = document.getElementById('yStepInput');
 const resetAxisBtn = document.getElementById('resetAxisBtn');
 const statusEl = document.getElementById('status');
 const exportBtn = document.getElementById('exportBtn');
+const reportEl = document.getElementById('report');
+const distributionTitle = document.getElementById('distributionTitle');
+const capacityTitle = document.getElementById('capacityTitle');
 var lastValidAxis = null;
 
 function fmt(v, digits) {
@@ -469,13 +474,133 @@ function drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, mainLeft) 
   ctx.fillText('C', boxLeft - 18, my);
 }
 
+function safeTitleText(el, fallback) {
+  var text = (el && el.textContent ? el.textContent : '').trim();
+  return text || fallback;
+}
+
+function drawEditableTitleBars(exportCtx, scale) {
+  exportCtx.fillStyle = '#e9e9e9';
+  exportCtx.strokeStyle = '#bcbcbc';
+  exportCtx.lineWidth = 1 * scale;
+  exportCtx.fillRect(0, 0, 286 * scale, 20 * scale);
+  exportCtx.strokeRect(0.5 * scale, 0.5 * scale, 285 * scale, 19 * scale);
+  exportCtx.beginPath();
+  exportCtx.moveTo(8 * scale, 7 * scale);
+  exportCtx.lineTo(18 * scale, 7 * scale);
+  exportCtx.lineTo(13 * scale, 15 * scale);
+  exportCtx.closePath();
+  exportCtx.fillStyle = '#777';
+  exportCtx.fill();
+  exportCtx.fillStyle = '#111';
+  exportCtx.font = 'bold ' + (16 * scale) + 'px Arial, "Microsoft YaHei", sans-serif';
+  exportCtx.textAlign = 'left';
+  exportCtx.textBaseline = 'middle';
+  exportCtx.fillText(safeTitleText(distributionTitle, '分布'), 24 * scale, 10 * scale);
+
+  exportCtx.fillStyle = '#e9e9e9';
+  exportCtx.strokeStyle = '#bcbcbc';
+  exportCtx.fillRect(18 * scale, 22 * scale, 240 * scale, 20 * scale);
+  exportCtx.strokeRect(18.5 * scale, 22.5 * scale, 239 * scale, 19 * scale);
+  exportCtx.beginPath();
+  exportCtx.moveTo(26 * scale, 29 * scale);
+  exportCtx.lineTo(36 * scale, 29 * scale);
+  exportCtx.lineTo(31 * scale, 36 * scale);
+  exportCtx.closePath();
+  exportCtx.fillStyle = '#d52b2b';
+  exportCtx.fill();
+  exportCtx.fillStyle = '#111';
+  exportCtx.font = 'bold ' + (15 * scale) + 'px Arial, "Microsoft YaHei", sans-serif';
+  exportCtx.fillText(safeTitleText(capacityTitle, '容量'), 42 * scale, 32 * scale);
+}
+
+function drawTableToCanvas(exportCtx, rows, x, y, colWidths, rowH, scale, options) {
+  exportCtx.font = (options.fontWeight || '') + ' ' + (14 * scale) + 'px Arial, "Microsoft YaHei", SimSun, sans-serif';
+  exportCtx.textBaseline = 'middle';
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var rowY = y + i * rowH;
+    for (var c = 0; c < row.length; c++) {
+      var cellX = x;
+      for (var pc = 0; pc < c; pc++) cellX += colWidths[pc];
+      if (options.bg && options.bg[c]) {
+        exportCtx.fillStyle = options.bg[c];
+        exportCtx.fillRect(cellX * scale, rowY * scale, colWidths[c] * scale, rowH * scale);
+      }
+      exportCtx.fillStyle = '#111';
+      exportCtx.textAlign = options.align && options.align[c] ? options.align[c] : 'left';
+      var textX = cellX + 3;
+      if (exportCtx.textAlign === 'right') textX = cellX + colWidths[c] - 4;
+      if (exportCtx.textAlign === 'center') textX = cellX + colWidths[c] / 2;
+      exportCtx.fillText(String(row[c] || ''), textX * scale, (rowY + rowH / 2) * scale);
+    }
+  }
+}
+
+function drawSectionTitle(exportCtx, title, x, y, width, scale) {
+  exportCtx.fillStyle = '#e9e9e9';
+  exportCtx.strokeStyle = '#bcbcbc';
+  exportCtx.lineWidth = 1 * scale;
+  exportCtx.fillRect(x * scale, y * scale, width * scale, 20 * scale);
+  exportCtx.strokeRect((x + 0.5) * scale, (y + 0.5) * scale, (width - 1) * scale, 19 * scale);
+  exportCtx.beginPath();
+  exportCtx.moveTo((x + 6) * scale, (y + 7) * scale);
+  exportCtx.lineTo((x + 16) * scale, (y + 7) * scale);
+  exportCtx.lineTo((x + 11) * scale, (y + 14) * scale);
+  exportCtx.closePath();
+  exportCtx.fillStyle = '#d52b2b';
+  exportCtx.fill();
+  exportCtx.fillStyle = '#111';
+  exportCtx.font = 'bold ' + (15 * scale) + 'px Arial, "Microsoft YaHei", sans-serif';
+  exportCtx.textAlign = 'left';
+  exportCtx.textBaseline = 'middle';
+  exportCtx.fillText(title, (x + 22) * scale, (y + 10) * scale);
+}
+
+function buildReportExportCanvas() {
+  var scale = Math.max(2, Math.ceil(window.devicePixelRatio || 1));
+  var exportCanvas = document.createElement('canvas');
+  var reportHeight = Math.ceil(reportEl.getBoundingClientRect().height || 620);
+  exportCanvas.width = 286 * scale;
+  exportCanvas.height = reportHeight * scale;
+  var exportCtx = exportCanvas.getContext('2d');
+  exportCtx.scale(scale, scale);
+  exportCtx.fillStyle = '#fff';
+  exportCtx.fillRect(0, 0, 286, reportHeight);
+  exportCtx.scale(1 / scale, 1 / scale);
+
+  drawEditableTitleBars(exportCtx, scale);
+  exportCtx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 30 * scale, 46 * scale, 236 * scale, 300 * scale);
+
+  var qTitleY = 350;
+  drawSectionTitle(exportCtx, '分位数', 30, qTitleY, 200, scale);
+  var qRows = DATA.quantiles.map(function (row) { return [row.pct, row.label || '', fmt(row.value, 2)]; });
+  drawTableToCanvas(exportCtx, qRows, 34, qTitleY + 22, [52, 78, 88], 17, scale, {
+    bg: ['#f1f1f1', '', ''],
+    align: ['left', 'left', 'right']
+  });
+
+  var summaryTitleY = qTitleY + 22 + qRows.length * 17 + 4;
+  drawSectionTitle(exportCtx, '汇总统计量', 30, summaryTitleY, 200, scale);
+  var s = DATA.stats;
+  var summaryRows = [
+    ['均值', fmt(s.mean, 2)], ['标准差', fmt(s.stdDev, 2)], ['均值标准误差', fmt(s.stdErr, 2)],
+    ['均值 95% 上限', fmt(s.ci95Upper, 2)], ['均值 95% 下限', fmt(s.ci95Lower, 2)], ['数目', String(s.count)]
+  ];
+  drawTableToCanvas(exportCtx, summaryRows, 34, summaryTitleY + 22, [112, 94], 17, scale, {
+    bg: ['#ededed', ''],
+    align: ['left', 'right']
+  });
+  return exportCanvas;
+}
+
 function buildTables() {
   var q = document.getElementById('quantileTable');
   q.innerHTML = '';
   for (var i = 0; i < DATA.quantiles.length; i++) {
     var row = DATA.quantiles[i];
     var pct = document.createElement('div'); pct.className = 'pct'; pct.textContent = row.pct;
-    var value = document.createElement('div'); value.className = 'value'; value.textContent = fmt(row.value, 3);
+    var value = document.createElement('div'); value.className = 'value'; value.textContent = fmt(row.value, 2);
     var label = document.createElement('div'); label.className = 'label'; label.textContent = row.label || '';
     q.append(pct, label, value);
   }
@@ -490,7 +615,7 @@ function buildTables() {
     var name = rows[ri][0];
     var val = rows[ri][1];
     var n = document.createElement('div'); n.className = 'name'; n.textContent = name;
-    var v = document.createElement('div'); v.className = 'val'; v.textContent = name === '数目' ? String(val) : fmt(val, 6);
+    var v = document.createElement('div'); v.className = 'val'; v.textContent = name === '数目' ? String(val) : fmt(val, 2);
     summary.append(n, v);
   }
   var abnormalText = Object.keys(DATA.abnormal).map(function (k) { return k + ':' + DATA.abnormal[k]; }).join('，') || '无';
@@ -543,14 +668,29 @@ yMinInput.addEventListener('input', refreshChart);
 yMaxInput.addEventListener('input', refreshChart);
 yStepInput.addEventListener('input', refreshChart);
 resetAxisBtn.addEventListener('click', resetAxisSettings);
+[distributionTitle, capacityTitle].forEach(function (titleEl) {
+  titleEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); titleEl.blur(); }
+  });
+  titleEl.addEventListener('paste', function (e) {
+    e.preventDefault();
+    var text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, text.replace(/[\r\n]+/g, ' '));
+  });
+  titleEl.addEventListener('blur', function () {
+    if (!titleEl.textContent.trim()) titleEl.textContent = titleEl.id === 'distributionTitle' ? '分布' : '容量';
+  });
+});
+
 exportBtn.addEventListener('click', function () {
-  statusEl.textContent = '正在导出图片...';
-  canvas.toBlob(function (blob) {
+  statusEl.textContent = '正在导出报告区域图片...';
+  var exportCanvas = buildReportExportCanvas();
+  exportCanvas.toBlob(function (blob) {
     if (!blob) { statusEl.textContent = '导出失败：浏览器未生成图片'; return; }
     var url = URL.createObjectURL(blob);
     var link = document.createElement('a');
     link.href = url;
-    var safeName = String(DATA.batchId || 'capacity_distribution');
+    var safeName = String(DATA.batchId || 'capacity_distribution_report');
     var badChars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
     for (var ci = 0; ci < badChars.length; ci++) safeName = safeName.split(badChars[ci]).join('_');
     link.download = safeName + '.png';
@@ -560,7 +700,7 @@ exportBtn.addEventListener('click', function () {
     setTimeout(function () {
       URL.revokeObjectURL(url);
       link.remove();
-      statusEl.textContent = '图片已导出，临时下载对象已清理';
+      statusEl.textContent = '报告区域图片已导出，临时下载对象已清理';
     }, 300);
   }, 'image/png', 1.0);
 });
