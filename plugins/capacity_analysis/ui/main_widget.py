@@ -4,7 +4,7 @@
 v1.8.0 流程：
 1. 选择文件夹 / 选择单个文件
 2. 解析 → 显示统计概览 + 异常样本数
-3. 一键渲染 JMP 风格分布图（用户选输出目录）
+3. 一键在程序内部弹窗渲染 JMP 风格分布图
 4. 历史记录自动写入 capacity_analysis_extraction_history
 """
 
@@ -15,7 +15,8 @@ import datetime as _dt
 from typing import Optional, List
 from dataclasses import asdict
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtGui import QGuiApplication, QImage
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QGroupBox,
@@ -23,6 +24,13 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox, QProgressBar, QPlainTextEdit,
     QListWidget, QListWidgetItem,
 )
+
+try:
+    from PySide6.QtWebChannel import QWebChannel
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except Exception:  # pragma: no cover - depends on optional Qt WebEngine install
+    QWebChannel = None
+    QWebEngineView = None
 
 from config import config
 from core.logger import get_logger
@@ -34,9 +42,102 @@ from plugins.capacity_analysis.models import (
     ensure_history_table,
     AnalysisResult,
 )
-from plugins.capacity_analysis.report_html import render_distribution_html
+from plugins.capacity_analysis.report_html import build_distribution_html
 
 logger = get_logger("capacity_analysis.ui")
+
+
+class ReportImageBridge(QObject):
+    """HTML 报告与 Qt 图片导出/剪切板之间的桥接。"""
+
+    finished = Signal(bool, str)
+
+    def _image_from_data_url(self, data_url: str) -> QImage:
+        prefix = "data:image/png;base64,"
+        if not data_url.startswith(prefix):
+            return QImage()
+        import base64
+
+        raw = base64.b64decode(data_url[len(prefix):])
+        return QImage.fromData(raw, "PNG")
+
+    @Slot(str, str)
+    def exportImage(self, data_url: str, default_name: str):
+        try:
+            image = self._image_from_data_url(data_url)
+            if image.isNull():
+                self.finished.emit(False, "导出失败：图片数据无法读取")
+                return
+            parent = self.parent() if isinstance(self.parent(), QWidget) else None
+            path, _ = QFileDialog.getSaveFileName(parent, "导出报告图片", default_name, "PNG 图片 (*.png)")
+            if not path:
+                self.finished.emit(False, "已取消导出图片")
+                return
+            if not path.lower().endswith(".png"):
+                path += ".png"
+            if image.save(path, "PNG"):
+                self.finished.emit(True, f"报告区域图片已导出：{path}")
+            else:
+                self.finished.emit(False, "导出失败：图片保存失败")
+        except Exception as exc:
+            logger.error(f"导出报告图片失败: {exc}", exc_info=True)
+            self.finished.emit(False, f"导出失败：{exc}")
+
+    @Slot(str)
+    def copyImage(self, data_url: str):
+        try:
+            image = self._image_from_data_url(data_url)
+            if image.isNull():
+                self.finished.emit(False, "复制失败：图片数据无法读取")
+                return
+            QGuiApplication.clipboard().setImage(image)
+            self.finished.emit(True, "报告区域图片已复制到剪切板")
+        except Exception as exc:
+            logger.error(f"复制报告图片失败: {exc}", exc_info=True)
+            self.finished.emit(False, f"复制失败：{exc}")
+
+
+class CapacityReportWindow(QWidget):
+    """程序内部弹出的分容交互报告窗口。"""
+
+    def __init__(self, html_doc: str, title: str, parent: Optional[QWidget] = None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle(title)
+        self.resize(1120, 760)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        if QWebEngineView is None or QWebChannel is None:
+            msg = QLabel("当前环境缺少 Qt WebEngine，无法在程序内展示 HTML 报告。")
+            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(msg)
+            return
+        self._bridge = ReportImageBridge(self)
+        self._bridge.finished.connect(self._on_report_action_finished)
+        self._channel = QWebChannel(self)
+        self._channel.registerObject("qtReportBridge", self._bridge)
+        self._view = QWebEngineView(self)
+        self._view.page().setWebChannel(self._channel)
+        layout.addWidget(self._view)
+        channel_script = (
+            '<script src="qrc:///qtwebchannel/qwebchannel.js"></script>'
+            '<script>'
+            'new QWebChannel(qt.webChannelTransport, function(channel) {'
+            '  window.qtReportBridge = channel.objects.qtReportBridge;'
+            '});'
+            '</script>'
+        )
+        html_doc = html_doc.replace("</head>", channel_script + "</head>")
+        self._view.setHtml(html_doc)
+
+    def _on_report_action_finished(self, ok: bool, message: str):
+        if hasattr(self, "_view"):
+            safe_message = message.replace("\\", "\\\\").replace("'", "\\'")
+            class_name = "status" if ok else "status error"
+            self._view.page().runJavaScript(
+                "var s=document.getElementById('status');"
+                "s.textContent='" + safe_message + "';"
+                "s.className='" + class_name + "';"
+            )
 
 
 class AnalyzeWorker(QThread):
@@ -96,6 +197,7 @@ class CapacityAnalysisWidget(QWidget):
         super().__init__(parent)
         self.setObjectName("capacity_analysis_widget")
         self._last_results: List[AnalysisResult] = []
+        self._report_windows: List[CapacityReportWindow] = []
         self._setup_ui()
         self._restore_last_dir()
 
@@ -108,7 +210,7 @@ class CapacityAnalysisWidget(QWidget):
         title_box = QVBoxLayout()
         title = QLabel("分容数据统计分析")
         title.setObjectName("page_title")
-        subtitle = QLabel("选择精捷能分容柜导出的 Excel/CSV，一键生成 JMP 风格交互报告（HTML 内置 Y轴参数设置 + 直方图间距调节 + 导出图片）。")
+        subtitle = QLabel("选择精捷能分容柜导出的 Excel/CSV，一键在程序内弹出 JMP 风格交互报告（HTML 内置 Y轴参数设置 + 直方图间距调节 + 导出/复制图片）。")
         subtitle.setObjectName("page_desc")
         subtitle.setWordWrap(True)
         title_box.addWidget(title)
@@ -197,7 +299,7 @@ class CapacityAnalysisWidget(QWidget):
 
         out_box.addStretch()
 
-        self._btn_plot = QPushButton("生成交互报告 HTML")
+        self._btn_plot = QPushButton("生成交互报告")
         self._btn_plot.setObjectName("btn_success")
         self._btn_plot.clicked.connect(self._on_plot)
         self._btn_plot.setEnabled(False)
@@ -323,26 +425,20 @@ class CapacityAnalysisWidget(QWidget):
     def _on_plot(self):
         if not self._last_results:
             return
-        r = self._last_results[0]
-        out_dir = QFileDialog.getExistingDirectory(self, "选择分布图输出目录",
-                                                  getattr(config, "last_data_dir", ""))
-        if not out_dir:
+        if QWebEngineView is None or QWebChannel is None:
+            QMessageBox.critical(self, "失败", "当前环境缺少 Qt WebEngine，无法在程序内展示交互报告")
             return
-        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = os.path.join(out_dir, f"{r.batch_id}_{ts}_distribution_report.html")
+        r = self._last_results[0]
         try:
-            saved = render_distribution_html(r, out_path)
-            if saved:
-                self._log.appendPlainText(f"交互报告已生成: {saved}")
-                QMessageBox.information(
-                    self,
-                    "完成",
-                    "交互报告已保存到:\n"
-                    f"{saved}\n\n"
-                    "打开 HTML 后可用滑块调节直方图柱间距，并点击“导出图片”保存 PNG。",
-                )
-            else:
+            html_doc = build_distribution_html(r)
+            if not html_doc:
                 QMessageBox.critical(self, "失败", "交互报告生成失败（没有有效数据？）")
+                return
+            win = CapacityReportWindow(html_doc, f"分容分布报告 - {r.batch_id}", self)
+            win.destroyed.connect(lambda *_: self._report_windows.remove(win) if win in self._report_windows else None)
+            self._report_windows.append(win)
+            win.show()
+            self._log.appendPlainText("交互报告已在程序内部窗口中打开，可直接导出或复制报告图片。")
         except Exception as e:
             logger.error(f"生成交互报告失败: {e}", exc_info=True)
             QMessageBox.critical(self, "失败", f"生成交互报告失败: {e}")

@@ -177,6 +177,7 @@ canvas { display: block; width: 236px; height: 300px; }
     <input id="gapRange" type="range" min="0" max="70" step="1" value="8" aria-label="直方图柱间距">
     <input id="gapNumber" type="number" min="0" max="70" step="1" value="8">%
     <button id="exportBtn" type="button">导出图片</button>
+    <button id="copyBtn" type="button">复制到剪切板</button>
   </div>
   <div id="status" class="status" aria-live="polite">调整参数可实时预览</div>
 </div>
@@ -209,6 +210,7 @@ const yStepInput = document.getElementById('yStepInput');
 const resetAxisBtn = document.getElementById('resetAxisBtn');
 const statusEl = document.getElementById('status');
 const exportBtn = document.getElementById('exportBtn');
+const copyBtn = document.getElementById('copyBtn');
 const reportEl = document.getElementById('report');
 const distributionTitle = document.getElementById('distributionTitle');
 const capacityTitle = document.getElementById('capacityTitle');
@@ -448,14 +450,6 @@ function drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, mainLeft) 
   ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.moveTo(cx - boxW / 2, y(med)); ctx.lineTo(cx + boxW / 2, y(med)); ctx.stroke();
 
-  ctx.strokeStyle = '#d33'; ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(cx - boxW / 2 - 6, y(q1));
-  ctx.lineTo(cx - boxW / 2 - 12, y(q1));
-  ctx.lineTo(cx - boxW / 2 - 12, y(q3));
-  ctx.lineTo(cx - boxW / 2 - 6, y(q3));
-  ctx.stroke();
-
   ctx.fillStyle = '#000';
   for (var oi = 0; oi < out.length; oi++) {
     var yy = y(out[oi]);
@@ -472,11 +466,6 @@ function drawBoxplot(y, boxLeft, boxRight, top, plotH, values, stats, mainLeft) 
   ctx.closePath();
   ctx.stroke();
 
-  ctx.fillStyle = '#d33';
-  ctx.font = 'bold 13px Arial, sans-serif';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('C', boxLeft - 18, my);
 }
 
 function safeTitleText(el, fallback) {
@@ -560,6 +549,32 @@ function drawSectionTitle(exportCtx, title, x, y, width, scale) {
   exportCtx.textAlign = 'left';
   exportCtx.textBaseline = 'middle';
   exportCtx.fillText(title, (x + 22) * scale, (y + 10) * scale);
+}
+
+function canvasToDataUrl(exportCanvas) {
+  return exportCanvas.toDataURL('image/png');
+}
+
+function copyReportImageToClipboard() {
+  statusEl.textContent = '正在复制报告区域图片...';
+  var exportCanvas = buildReportExportCanvas();
+  var dataUrl = canvasToDataUrl(exportCanvas);
+  if (window.qtReportBridge && typeof window.qtReportBridge.copyImage === 'function') {
+    window.qtReportBridge.copyImage(dataUrl);
+    return;
+  }
+  if (navigator.clipboard && window.ClipboardItem) {
+    exportCanvas.toBlob(function (blob) {
+      if (!blob) { statusEl.textContent = '复制失败：浏览器未生成图片'; return; }
+      navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(function () {
+        statusEl.textContent = '报告区域图片已复制到剪切板';
+      }).catch(function (err) {
+        statusEl.textContent = '复制失败：' + (err && err.message ? err.message : err);
+      });
+    }, 'image/png', 1.0);
+    return;
+  }
+  statusEl.textContent = '复制失败：当前环境不支持图片剪切板';
 }
 
 function buildReportExportCanvas() {
@@ -690,14 +705,18 @@ resetAxisBtn.addEventListener('click', resetAxisSettings);
 exportBtn.addEventListener('click', function () {
   statusEl.textContent = '正在导出报告区域图片...';
   var exportCanvas = buildReportExportCanvas();
+  var safeName = String(DATA.batchId || 'capacity_distribution_report');
+  var badChars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+  for (var ci = 0; ci < badChars.length; ci++) safeName = safeName.split(badChars[ci]).join('_');
+  if (window.qtReportBridge && typeof window.qtReportBridge.exportImage === 'function') {
+    window.qtReportBridge.exportImage(canvasToDataUrl(exportCanvas), safeName + '.png');
+    return;
+  }
   exportCanvas.toBlob(function (blob) {
     if (!blob) { statusEl.textContent = '导出失败：浏览器未生成图片'; return; }
     var url = URL.createObjectURL(blob);
     var link = document.createElement('a');
     link.href = url;
-    var safeName = String(DATA.batchId || 'capacity_distribution_report');
-    var badChars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
-    for (var ci = 0; ci < badChars.length; ci++) safeName = safeName.split(badChars[ci]).join('_');
     link.download = safeName + '.png';
     link.style.display = 'none';
     document.body.appendChild(link);
@@ -710,6 +729,10 @@ exportBtn.addEventListener('click', function () {
   }, 'image/png', 1.0);
 });
 
+copyBtn.addEventListener('click', function () {
+  copyReportImageToClipboard();
+});
+
 buildTables();
 syncAxisInputsFromAuto();
 setAxisInputsEnabled(false);
@@ -718,6 +741,23 @@ syncGap(8);
 </body>
 </html>
 """
+
+
+def build_distribution_html(
+    result: AnalysisResult,
+    records: List[CapacityRecord] | None = None,
+) -> str:
+    """生成自包含 HTML 报告内容。"""
+    data_records = records if records is not None else result.records
+    values = [float(r.capacity_mah) for r in data_records if r.capacity_mah > 0]
+    if not values:
+        logger.warning("没有有效数据，跳过 HTML 报告生成")
+        return ""
+
+    payload = _build_payload(result, data_records)
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    safe_title = html.escape(f"分容分布报告 - {result.batch_id}")
+    return _HTML_TEMPLATE.replace("{title}", safe_title).replace("{payload_json}", payload_json)
 
 
 def render_distribution_html(
@@ -729,17 +769,10 @@ def render_distribution_html(
 
     records 可传入与 result.stats 同口径的过滤后记录；不传则使用 result.records 全量。
     """
-    data_records = records if records is not None else result.records
-    values = [float(r.capacity_mah) for r in data_records if r.capacity_mah > 0]
-    if not values:
-        logger.warning("没有有效数据，跳过 HTML 报告生成")
+    doc = build_distribution_html(result, records)
+    if not doc:
         return ""
 
-    payload = _build_payload(result, data_records)
-    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    safe_title = html.escape(f"分容分布报告 - {result.batch_id}")
-
-    doc = _HTML_TEMPLATE.replace("{title}", safe_title).replace("{payload_json}", payload_json)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(doc)
