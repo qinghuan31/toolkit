@@ -108,7 +108,7 @@ class CapacityAnalysisWidget(QWidget):
         title_box = QVBoxLayout()
         title = QLabel("分容数据统计分析")
         title.setObjectName("page_title")
-        subtitle = QLabel("选择精捷能分容柜导出的 Excel/CSV，一键生成 JMP 风格交互报告（HTML 内置直方图间距调节 + 导出图片）。")
+        subtitle = QLabel("选择精捷能分容柜导出的 Excel/CSV，一键生成 JMP 风格交互报告（HTML 内置 Y轴参数设置 + 直方图间距调节 + 导出图片）。")
         subtitle.setObjectName("page_desc")
         subtitle.setWordWrap(True)
         title_box.addWidget(title)
