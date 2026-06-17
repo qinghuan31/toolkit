@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import math
-from typing import List
+from typing import List, Optional
 
 from core.logger import get_logger
 from plugins.capacity_analysis.models import (
@@ -75,13 +75,40 @@ def _t_critical_95(df: int) -> float:
     return 1.960
 
 
-def analyze(records: List[CapacityRecord], min_cycle_count: int = 1, max_cycle_count: int = 1) -> CapacityStats:
-    """计算 JMP 风格统计指标"""
+def filter_records_by_cycle(
+    records: List[CapacityRecord],
+    min_cycle_count: Optional[int] = None,
+    max_cycle_count: Optional[int] = None,
+) -> List[CapacityRecord]:
+    """按分容次数过滤记录。
+
+    注意：None 表示不过滤。之前默认写成 1..1 会在当前精捷能文件里把
+    cycle_count=3 的正常样本全部过滤掉，导致统计为空；因此默认必须保持全量。
+    """
+    filtered = []
+    for rec in records:
+        if min_cycle_count is not None and rec.cycle_count < min_cycle_count:
+            continue
+        if max_cycle_count is not None and rec.cycle_count > max_cycle_count:
+            continue
+        filtered.append(rec)
+    return filtered
+
+
+def analyze(
+    records: List[CapacityRecord],
+    min_cycle_count: Optional[int] = None,
+    max_cycle_count: Optional[int] = None,
+) -> CapacityStats:
+    """计算 JMP 风格统计指标。
+
+    Args:
+        records: 待统计记录。
+        min_cycle_count/max_cycle_count: 可选分容次数过滤。默认 None 表示不过滤，
+            保持图形、分位数和汇总统计的数据口径一致。
+    """
     stats = CapacityStats()
-    filtered_records = [
-        r for r in records
-        if min_cycle_count <= r.cycle_count <= max_cycle_count
-    ]
+    filtered_records = filter_records_by_cycle(records, min_cycle_count, max_cycle_count)
     if not filtered_records:
         return stats
     values = sorted([r.capacity_mah for r in filtered_records if r.capacity_mah > 0])
