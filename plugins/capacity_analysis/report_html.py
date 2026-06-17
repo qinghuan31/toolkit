@@ -323,17 +323,21 @@ function draw(gapPct) {
   };
 
   var span = yMax - yMin;
-  var fd = span / Math.max(8, Math.pow(values.length, 1 / 3) * 2);
-  var binW = Math.max(span / 24, fd);
-  var mag = Math.pow(10, Math.floor(Math.log10(binW)));
-  var norm = binW / mag;
-  var step;
-  if (norm < 1.5) step = 1 * mag;
-  else if (norm < 3) step = 2 * mag;
-  else if (norm < 7) step = 5 * mag;
-  else step = 10 * mag;
-  binW = step;
-  var binCount = Math.max(10, Math.min(28, Math.ceil(span / binW)));
+  var binW;
+  if (!axis.auto && Number.isFinite(axis.step) && axis.step > 0) {
+    binW = axis.step;
+  } else {
+    var fd = span / Math.max(8, Math.pow(values.length, 1 / 3) * 2);
+    binW = Math.max(span / 24, fd);
+    var mag = Math.pow(10, Math.floor(Math.log10(binW)));
+    var norm = binW / mag;
+    var step;
+    if (norm < 1.5) step = 1 * mag;
+    else if (norm < 3) step = 2 * mag;
+    else if (norm < 7) step = 5 * mag;
+    else step = 10 * mag;
+    binW = step;
+  }
   var firstEdge = Math.floor(yMin / binW) * binW;
   var lastEdge = Math.ceil(yMax / binW) * binW;
   var edges = [];
@@ -344,6 +348,7 @@ function draw(gapPct) {
     var v = values[vi];
     if (v < yMin || v > yMax) continue;
     var idx = Math.floor((v - edges[0]) / binW);
+    if (Math.abs(v - edges[edges.length - 1]) < 1e-9) idx = counts.length - 1;
     if (idx < 0) idx = 0;
     if (idx >= counts.length) idx = counts.length - 1;
     counts[idx]++;
@@ -414,7 +419,7 @@ function draw(gapPct) {
   if (!axis.error) {
     var mode = axis.auto ? '自动Y轴' : ('Y轴 ' + fmt(axis.min, 2) + ' ~ ' + fmt(axis.max, 2) + '，步长 ' + fmt(axis.step, 2));
     var clipped = values.length - inRangeCount;
-    setStatus(mode + (clipped > 0 ? '，范围外 ' + clipped + ' 点未计入直方图' : '') + '，柱间距 ' + Math.round(gapPct) + '%', false);
+    setStatus(mode + '，分箱 ' + fmt(binW, 2) + (clipped > 0 ? '，范围外 ' + clipped + ' 点未计入直方图' : '') + '，柱间距 ' + Math.round(gapPct) + '%', false);
   }
 }
 
